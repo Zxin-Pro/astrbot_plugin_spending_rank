@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>烛之榜单</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/misans@4.1.0/lib/Normal/MiSans-Regular.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/misans@4.1.0/lib/Normal/MiSans-Bold.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/misans@4.1.0/lib/Normal/MiSans-Medium.min.css">
+<style>
+  /* ===================================================================
+     WorldCodes · 全站每日 Token 排行榜（一行一人）
+     视觉沿用「烛之播报」：深蓝→青绿渐变 + MiSans + 金色品牌字 + 青色点缀
+     由 AstrBot t2i 渲染服务（Jinja2 + 无头浏览器 full_page 截图）出图
+     =================================================================== */
+  :root {
+    --page-w: {{ image_width }}px;
+
+    --gold: #ffd882;
+    --cyan: #6fd3ff;
+    --mint: #6ee7b7;
+    --text: #e8eef5;
+    --text-sub: rgba(232, 238, 245, .62);
+    --text-dim: rgba(232, 238, 245, .40);
+    --line: rgba(255, 255, 255, .055);
+    --line-strong: rgba(255, 255, 255, .14);
+    --panel: rgba(255, 255, 255, .055);
+    --panel-line: rgba(255, 255, 255, .09);
+
+    --font-sans: "MiSans", -apple-system, "PingFang SC", "Noto Sans CJK SC",
+                 "Source Han Sans SC", "Microsoft YaHei", sans-serif;
+    --font-mono: ui-monospace, "SFMono-Regular", "Roboto Mono", "JetBrains Mono",
+                 "DejaVu Sans Mono", Consolas, monospace;
+
+    /* 每列宽度：排名 | 用户 | Token | 请求 | 消耗 */
+    /* 用户列的下限必须 > 0：写成 minmax(0, 1fr) 时，页面偏窄会让它被挤到只剩几像素，
+       整列姓名退化成一个个残字，同时其余定宽列把容器撑破、截图右侧多出一截空白。 */
+    --cols: 62px minmax(220px, 1fr) 128px 92px 138px;
+    --cols-no-cost: 62px minmax(220px, 1fr) 150px 108px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { background: #101725; }
+
+  body {
+    width: var(--page-w);
+    /* image_width 配得过小时（例如旧版默认值 600），宁可把整页撑到列宽放得下，
+       也不让内容溢出后被裁切；min-content 由 --cols 各列最小宽度 + 内边距算出。 */
+    min-width: min-content;
+    background: linear-gradient(160deg, #101725 0%, #16233a 55%, #12303c 100%);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 23px;
+    padding: 34px 40px 42px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---------- 顶部：品牌 + 日期 ---------- */
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    border-bottom: 2px solid var(--line-strong);
+    padding-bottom: 16px;
+    margin-bottom: 22px;
+  }
+  .brand {
+    font-size: 34px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    color: var(--gold);
+    white-space: nowrap;
+  }
+  .brand .dot { color: var(--cyan); }
+  .sub {
+    font-size: 19px;
+    color: rgba(232, 238, 245, .55);
+    white-space: nowrap;
+  }
+  .sub .sep { opacity: .45; margin: 0 6px; }
+
+  /* ---------- 榜单主体：一块玻璃面板，每行一人 ---------- */
+  .board {
+    background: var(--panel);
+    border: 1px solid var(--panel-line);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: var(--cols);
+    align-items: center;
+    column-gap: 12px;
+    padding: 12px 22px;
+    border-bottom: 1px solid var(--line);
+  }
+  body.no-cost .row { grid-template-columns: var(--cols-no-cost); }
+  .row:last-child { border-bottom: none; }
+
+  /* 表头 */
+  .row.head {
+    font-size: 17px;
+    letter-spacing: .08em;
+    background: rgba(255, 255, 255, .035);
+    border-bottom: 1px solid var(--panel-line);
+    padding-top: 13px;
+    padding-bottom: 13px;
+  }
+  /* 表头单元格压掉数据列的字色 / 等宽字体 / 发光 */
+  .row.head > div {
+    color: var(--text-dim);
+    font-family: var(--font-sans);
+    font-size: 17px;
+    font-weight: 400;
+    text-shadow: none;
+    white-space: nowrap;
+  }
+  .num { text-align: right; }
+
+  /* 前三名高亮 */
+  .row.item.top1 {
+    background: linear-gradient(90deg, rgba(255, 216, 130, .13) 0%, rgba(255, 216, 130, .02) 62%, transparent 100%);
+    box-shadow: inset 4px 0 0 0 var(--gold);
+  }
+  .row.item.top2 {
+    background: linear-gradient(90deg, rgba(207, 224, 238, .11) 0%, rgba(207, 224, 238, .02) 62%, transparent 100%);
+    box-shadow: inset 4px 0 0 0 #cfe0ee;
+  }
+  .row.item.top3 {
+    background: linear-gradient(90deg, rgba(232, 165, 107, .11) 0%, rgba(232, 165, 107, .02) 62%, transparent 100%);
+    box-shadow: inset 4px 0 0 0 #e8a56b;
+  }
+
+  /* 排名 */
+  .rank-num {
+    font-family: var(--font-mono);
+    font-size: 25px;
+    font-weight: 700;
+    color: var(--text-dim);
+  }
+  .top1 .rank-num,
+  .top2 .rank-num,
+  .top3 .rank-num {
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+  .top1 .rank-num { background-image: linear-gradient(180deg, #fff2cf 0%, #ffd882 55%, #e0a53c 100%); }
+  .top2 .rank-num { background-image: linear-gradient(180deg, #ffffff 0%, #cfe0ee 55%, #93a9bd 100%); }
+  .top3 .rank-num { background-image: linear-gradient(180deg, #ffdcb4 0%, #e8a56b 55%, #c07a3c 100%); }
+
+  /* 昵称：单行省略 */
+  .c-name {
+    min-width: 0;
+    overflow: hidden;
+  }
+  .name {
+    display: block;
+    font-size: 23px;
+    font-weight: 500;
+    color: #f2f7fc;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .top1 .name { color: #fff6e2; font-weight: 700; }
+
+  /* 数字列 */
+  .c-tokens,
+  .c-req {
+    font-family: var(--font-mono);
+    font-size: 20px;
+    color: var(--text-sub);
+    text-align: right;
+    white-space: nowrap;
+  }
+  .c-cost {
+    font-family: var(--font-mono);
+    font-size: 23px;
+    font-weight: 700;
+    color: var(--mint);
+    text-align: right;
+    white-space: nowrap;
+    text-shadow: 0 0 12px rgba(110, 231, 183, .38);
+  }
+  .c-cost .cur { font-size: 18px; opacity: .75; margin-right: 2px; }
+
+  /* ---------- 空状态 ---------- */
+  .empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 74px 0;
+    font-size: 22px;
+    color: var(--text-dim);
+  }
+  .empty .icon { font-size: 30px; color: var(--cyan); opacity: .75; }
+
+  /* ---------- 底部：汇总 + 水印 ---------- */
+  footer {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 6px 18px;
+    /* 不能 nowrap：合计数字变长时 nowrap 会把 footer 顶出页面，截图就会被拍宽 */
+    flex-wrap: wrap;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line-strong);
+    font-size: 17px;
+    color: rgba(232, 238, 245, .50);
+  }
+  .summary { white-space: nowrap; }
+  .summary b {
+    color: var(--gold);
+    font-weight: 700;
+    margin-left: 5px;
+  }
+  .summary .sep { opacity: .35; margin: 0 7px; }
+  .watermark { white-space: nowrap; }
+  .stamp { font-family: var(--font-mono); color: rgba(232, 238, 245, .72); }
+</style>
+</head>
+<body{% if not show_cost %} class="no-cost"{% endif %}>
+<header>
+  <span class="brand"><span class="dot">{{ brand[:5] }}</span>{{ brand[5:] }}</span>
+  <span class="sub">全站 Token 榜<span class="sep">·</span>{{ date }}<span class="sep">·</span>TOP {{ rows | length }}</span>
+</header>
+
+<main>
+  {% if rows %}
+  <section class="board">
+    <div class="row head">
+      <div class="c-rank">排名</div>
+      <div class="c-name">用户</div>
+      <div class="c-tokens num">TOKEN</div>
+      <div class="c-req num">请求</div>
+      {% if show_cost %}<div class="c-cost num">消耗</div>{% endif %}
+    </div>
+    {% for row in rows %}
+    <div class="row item {{ row.rank_class }}">
+      <div class="c-rank"><span class="rank-num">{{ row.rank }}</span></div>
+      <div class="c-name" title="{{ row.name }}"><span class="name">{{ row.name }}</span></div>
+      <div class="c-tokens">{{ row.tokens_display }}</div>
+      <div class="c-req">{{ row.requests_display }}</div>
+      {% if show_cost %}<div class="c-cost"><span class="cur">&#36;</span>{{ row.cost_display }}</div>{% endif %}
+    </div>
+    {% endfor %}
+  </section>
+  {% else %}
+  <div class="empty">
+    <span class="icon">◔</span>
+    今日暂无消费记录
+  </div>
+  {% endif %}
+</main>
+
+<footer>
+  <div class="summary">
+    <span>上榜<b>{{ total_users }}</b> 人</span>
+    <span class="sep">|</span>
+    <span>合计 Token<b>{{ total_tokens_display }}</b></span>
+    {% if show_cost %}
+    <span class="sep">|</span>
+    <span>合计消耗<b>&#36;{{ total_cost_display }}</b></span>
+    {% endif %}
+  </div>
+  <div class="watermark">数据更新于 <span class="stamp">{{ updated_at }}</span></div>
+</footer>
+</body>
+</html>

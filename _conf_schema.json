@@ -1,0 +1,104 @@
+{
+  "api_url": {
+    "description": "排行榜接口地址",
+    "type": "string",
+    "hint": "默认 https://worldcodes.online/api/v1/leaderboard/daily，一般无需修改。",
+    "default": "https://worldcodes.online/api/v1/leaderboard/daily"
+  },
+  "api_token": {
+    "description": "接口鉴权 Token",
+    "type": "string",
+    "hint": "请求头会带上 Authorization: Bearer <Token>。留空则不带鉴权头（接口返回 401/403 时请检查此项）。",
+    "default": ""
+  },
+  "cache_ttl": {
+    "description": "数据缓存时间（秒）",
+    "type": "int",
+    "hint": "默认 300 秒（5 分钟）。该时间内的 /排行榜 指令与定时播报会复用同一份数据，避免接口被刷。填 0 表示每次实时拉取。",
+    "default": 300
+  },
+  "request_timeout": {
+    "description": "接口请求超时（秒）",
+    "type": "int",
+    "hint": "默认 10 秒。网络较慢可适当调大。",
+    "default": 10
+  },
+  "top_n": {
+    "description": "榜单展示人数",
+    "type": "int",
+    "hint": "默认 10，即只渲染 Token 消耗前 10 名。",
+    "default": 10
+  },
+  "cron_enabled": {
+    "description": "启用每日定时播报",
+    "type": "bool",
+    "hint": "关闭后只保留 /排行榜 手动指令。",
+    "default": true
+  },
+  "cron_time": {
+    "description": "定时播报时间（HH:MM）",
+    "type": "string",
+    "hint": "24 小时制，例如 23:00 表示每晚 23 点整推送。修改后建议重载插件立即生效。",
+    "default": "23:00"
+  },
+  "target_group": {
+    "description": "定时播报目标群号",
+    "type": "string",
+    "hint": "填群号（如 123456789），或完整会话串（如 aiocqhttp:GroupMessage:123456789）。留空则跳过定时推送。",
+    "default": ""
+  },
+  "platform_id": {
+    "description": "平台适配器 ID",
+    "type": "string",
+    "hint": "用于拼接目标群会话串；QQ 个人号/协议端一般为 aiocqhttp。仅在 target_group 只填纯群号时生效。",
+    "default": "aiocqhttp"
+  },
+  "show_cost": {
+    "description": "展示消耗金额列",
+    "type": "bool",
+    "hint": "关闭后榜单只显示 Token 与请求次数，不出现金额列（排名口径不受影响，仍是 Token 量）。",
+    "default": true
+  },
+  "brand": {
+    "description": "榜单左上角品牌字",
+    "type": "string",
+    "hint": "默认 WorldCodes：前 5 个字符显示为青色，其余显示为金色。",
+    "default": "WorldCodes"
+  },
+  "image_width": {
+    "description": "出图宽度（像素）",
+    "type": "int",
+    "hint": "默认 880，高度由内容自适应。填得过小时（如旧版默认值 600）用户列会被挤扁，模板此时会自动把整页撑宽做兜底，但仍建议保持 880。",
+    "default": 880
+  },
+  "image_format": {
+    "description": "出图格式",
+    "type": "string",
+    "hint": "png（默认，最清晰）或 jpeg（体积小，适合网络慢的情况）。",
+    "default": "png"
+  },
+  "image_quality": {
+    "description": "JPEG 画质",
+    "type": "int",
+    "hint": "仅 image_format = jpeg 时生效，取值 30-100，默认 92。",
+    "default": 92
+  },
+  "render_mode": {
+    "description": "出图通道",
+    "type": "string",
+    "hint": "auto（默认，推荐）：先用本地渲染器出图，本地不可用才退回远端服务。local：只用本地 Pillow 渲染，完全不联网。remote：只用远端 t2i 服务（旧行为，服务限流 429 / 没节点 503 时会出不了图）。",
+    "default": "auto"
+  },
+  "t2i_endpoint": {
+    "description": "t2i 渲染服务地址（仅远端通道使用）",
+    "type": "string",
+    "hint": "默认使用 AstrBot 官方渲染服务。自建渲染服务时填自己的地址（不带 /generate）。",
+    "default": "https://t2i.soulter.top/text2img"
+  },
+  "render_timeout": {
+    "description": "出图超时（秒）",
+    "type": "int",
+    "hint": "默认 60 秒。渲染服务排队较慢时可调大。",
+    "default": 60
+  }
+}

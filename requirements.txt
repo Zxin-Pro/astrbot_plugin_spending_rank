@@ -1,0 +1,9 @@
+# astrbot_plugin_spending_rank 运行依赖
+# 安装：pip install -r requirements.txt（或在 AstrBot 的插件管理页点「安装依赖」）
+#
+# 出图默认由插件自带的本地渲染器完成（local_render.py，纯 Pillow 绘制），
+# 不需要 playwright、不需要 Chromium，也不需要访问任何远端渲染服务。
+# Pillow 一般随 AstrBot 一起装好了，这里显式声明以防万一。
+httpx>=0.24.0
+jinja2>=3.1.0
+pillow>=9.0.0

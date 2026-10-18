@@ -1,0 +1,52 @@
+name: astrbot_plugin_spending_rank
+display_name: 全站 Token 排行榜
+desc: 每日全站 Token 消耗排行榜播报插件。支持群内发送 /排行榜 即时出图，也支持每天定时把榜单图片推送到指定群聊。内置 Pillow 本地渲染器，不联网、不装浏览器也能出图；远端渲染服务只作可选通道，全线失败时自动降级为文字榜单。
+short_desc: 全站每日 Token 排行榜（手动 / 排行榜 + 每日定时推送）
+version: v1.2.0
+author: zjh19
+repo: ""
+astrbot_version: ">=4.0.0"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - telegram
+  - discord
+  - lark
+# ---------------------------------------------------------------------------
+# 下面的 config 段仅作为配置项文档参考，AstrBot 4.x 读取配置的真实来源是
+# 同目录的 _conf_schema.json（在 WebUI 的「插件配置」里渲染表单并写入
+# xxx_config.json），完整 16 项配置见该文件。
+# ---------------------------------------------------------------------------
+config:
+  api_url:
+    description: 排行榜接口地址
+    type: string
+    default: https://worldcodes.online/api/v1/leaderboard/daily
+  api_token:
+    description: 接口鉴权 Token（Bearer）
+    type: string
+    default: ""
+  cache_ttl:
+    description: 数据缓存时间（秒）
+    type: int
+    default: 300
+  cron_time:
+    description: 每日定时播报时间（HH:MM，24 小时制）
+    type: string
+    default: "23:00"
+  target_group:
+    description: 定时播报的目标群号
+    type: string
+    default: ""
+  brand:
+    description: 榜单左上角品牌字（前 5 个字符青色，其余金色）
+    type: string
+    default: WorldCodes
+  render_mode:
+    description: 出图通道（auto 本地优先 / local 只用本地 / remote 只用远端）
+    type: string
+    default: auto
+  t2i_endpoint:
+    description: 远端 t2i 渲染服务地址（仅远端通道使用）
+    type: string
+    default: https://t2i.soulter.top/text2img
