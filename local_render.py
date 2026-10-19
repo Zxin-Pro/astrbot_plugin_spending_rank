@@ -260,7 +260,7 @@ def _plan(panels: Sequence[dict], show_cost: bool, image_width: int) -> dict:
                   cost=21, rank=23, foot=16)
         geo = dict(rank=46, gap=10, row_v=11, head_v=12, row_pad_h=20, title_h=38,
                    radius=14, head_gap=20)
-        col_w = dict(tokens=96, cost=104, requests=84)
+        col_w = dict(tokens=88, cost=98, requests=76)
     else:
         panel_w = max(760, base)
         pad_x = 40
@@ -286,14 +286,10 @@ def _plan(panels: Sequence[dict], show_cost: bool, image_width: int) -> dict:
         label = (lambda k: "TOKEN" if k == "tokens" else "消耗")
 
         cols: list[dict] = []
-        if dual or not show_cost:
-            if show_cost or other != "cost":
-                cols.append(dict(key=other, w=col_w[other], primary=False, label=label(other)))
-            cols.append(dict(key=primary, w=col_w[primary], primary=True, label=label(primary)))
-        else:
+        if show_cost or other != "cost":
             cols.append(dict(key=other, w=col_w[other], primary=False, label=label(other)))
-            cols.append(dict(key="requests", w=col_w["requests"], primary=False, label="请求"))
-            cols.append(dict(key=primary, w=col_w[primary], primary=True, label=label(primary)))
+        cols.append(dict(key="requests", w=col_w["requests"], primary=False, label="请求"))
+        cols.append(dict(key=primary, w=col_w[primary], primary=True, label=label(primary)))
         return cols
 
     return dict(
@@ -319,12 +315,15 @@ def _fit_columns(plan: dict, cols: list[dict], panel: dict) -> None:
     f_num = _font(_s(fs["num"]), mono=True)
     cur_w = f_cur.getlength("$")
 
-    need = {"cost": 0.0, "tokens": 0.0}
+    need = {"cost": 0.0, "tokens": 0.0, "requests": 0.0}
     for row in rows:
         cost_txt = str(row.get("cost_display") or "0")
         need["cost"] = max(need["cost"], cur_w + f_cost.getlength(cost_txt) + _s(7))
         need["tokens"] = max(
             need["tokens"], f_num.getlength(str(row.get("tokens_display") or "0")) + _s(6)
+        )
+        need["requests"] = max(
+            need["requests"], f_num.getlength(str(row.get("requests_display") or "0")) + _s(6)
         )
 
     for col in cols:

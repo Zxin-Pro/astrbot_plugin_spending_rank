@@ -2,7 +2,7 @@ name: astrbot_plugin_spending_rank
 display_name: 全站双排行榜
 desc: 每日全站排行榜播报插件。接口同时给出 Token 用量榜与消耗额度榜时，两个榜左右并排画进同一张图，只有一套时自动退化为单榜。支持群内发送 /排行榜 即时出图，也支持每天定时把榜单图片推送到指定群聊。内置 Pillow 本地渲染器，不联网、不装浏览器也能出图；远端渲染服务只作可选通道，全线失败时自动降级为文字榜单。
 short_desc: 全站每日双排行榜（手动 /排行榜 + 每日定时推送）
-version: v1.3.0
+version: v1.3.1
 author: zjh19
 repo: "https://github.com/Zxin-Pro/astrbot_plugin_spending_rank"
 astrbot_version: ">=4.0.0"
