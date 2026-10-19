@@ -549,10 +549,11 @@ class SpendingRankPlugin(Star):
                 }
             )
 
-        if isinstance(token_list, list):
-            _add(token_list, "tokens", "Token 用量榜", "按总 Token 排序")
+        # 左栏 = 消耗额度榜，右栏 = Token 用量榜
         if isinstance(cost_list, list):
             _add(cost_list, "cost", "消耗额度榜", "按实际扣费排序")
+        if isinstance(token_list, list):
+            _add(token_list, "tokens", "Token 用量榜", "按总 Token 排序")
 
         if not panels:
             _add(_extract_list(payload), "tokens", "Token 用量榜", "按总 Token 排序")
@@ -562,10 +563,12 @@ class SpendingRankPlugin(Star):
             picked = [p for p in panels if p["metric"] == mode]
             panels = picked or panels[:1]
 
-        first = panels[0]
+        # 页脚的合计固定取 Token 榜那份（两榜成员可能不完全一致，
+        # 取第一栏会让合计数字随面板顺序漂移）
+        token_panel = next((p for p in panels if p["metric"] == "tokens"), panels[0])
         meta = {
             "date": self._date_text(payload),
-            **first["_sums"],
+            **token_panel["_sums"],
             "total_users": max(panel.get("total_rows", 0) for panel in panels),
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }

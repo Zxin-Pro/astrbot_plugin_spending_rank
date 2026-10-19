@@ -277,27 +277,23 @@ def _plan(panels: Sequence[dict], show_cost: bool, image_width: int) -> dict:
     inner_pad = 1 + geo["row_pad_h"]
     inner_w = panel_w - 2 * inner_pad
 
-    # 每一栏的列：双榜只放「主指标 + 次指标」，单榜放三列
+    # 每一栏的列：本榜排名的那个指标永远放在最右一列（表格惯例，
+    # 数值靠右对齐），另一个指标当参照列排在它左边。
     def columns_for(panel: dict) -> list[dict]:
         metric = str(panel.get("metric") or "tokens")
+        primary = metric if metric in ("tokens", "cost") else "tokens"
+        other = "cost" if primary == "tokens" else "tokens"
+        label = (lambda k: "TOKEN" if k == "tokens" else "消耗")
+
         cols: list[dict] = []
         if dual or not show_cost:
-            first = "tokens" if metric == "tokens" else "cost"
-            second = "cost" if metric == "tokens" else "tokens"
-            cols.append(dict(key=first, w=col_w[first], primary=True,
-                             label="TOKEN" if first == "tokens" else "消耗"))
-            if show_cost or second != "cost":
-                cols.append(dict(key=second, w=col_w[second], primary=False,
-                                 label="消耗" if second == "cost" else "TOKEN"))
+            if show_cost or other != "cost":
+                cols.append(dict(key=other, w=col_w[other], primary=False, label=label(other)))
+            cols.append(dict(key=primary, w=col_w[primary], primary=True, label=label(primary)))
         else:
-            # 单榜：主指标紧挨用户列排最左，再跟请求，次指标放最后
-            first = "tokens" if metric == "tokens" else "cost"
-            second = "cost" if first == "tokens" else "tokens"
-            cols.append(dict(key=first, w=col_w[first], primary=True,
-                             label="TOKEN" if first == "tokens" else "消耗"))
+            cols.append(dict(key=other, w=col_w[other], primary=False, label=label(other)))
             cols.append(dict(key="requests", w=col_w["requests"], primary=False, label="请求"))
-            cols.append(dict(key=second, w=col_w[second], primary=False,
-                             label="消耗" if second == "cost" else "TOKEN"))
+            cols.append(dict(key=primary, w=col_w[primary], primary=True, label=label(primary)))
         return cols
 
     return dict(
