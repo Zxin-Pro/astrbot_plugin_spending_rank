@@ -24,9 +24,9 @@
     "default": 10
   },
   "top_n": {
-    "description": "榜单展示人数",
+    "description": "每张榜单展示人数",
     "type": "int",
-    "hint": "默认 10，即只渲染 Token 消耗前 10 名。",
+    "hint": "默认 10，即每个榜只渲染前 10 名（双榜模式下两个榜各取前 N 名）。",
     "default": 10
   },
   "cron_enabled": {
@@ -58,6 +58,12 @@
     "type": "bool",
     "hint": "关闭后榜单只显示 Token 与请求次数，不出现金额列（排名口径不受影响，仍是 Token 量）。",
     "default": true
+  },
+  "panels": {
+    "description": "榜单模式",
+    "type": "string",
+    "hint": "dual（默认）：接口返回的 Token 用量榜与消耗额度榜左右并排出图。tokens：只画 Token 用量榜（单栏五行）。cost：只画消耗额度榜。接口只返回一个榜时，dual 会自动退化成单栏。",
+    "default": "dual"
   },
   "brand": {
     "description": "榜单左上角品牌字",

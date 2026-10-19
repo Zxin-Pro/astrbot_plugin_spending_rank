@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-"""astrbot_plugin_spending_rank —— API 中转站「全站每日消费排行榜」播报插件。
+"""astrbot_plugin_spending_rank —— API 中转站「全站每日排行榜」播报插件。
 
 功能概览
 --------
 1. 被动触发：群内发送 /排行榜（别名：消费榜 / 消费排行榜 / 消费排行），
    立即拉取接口数据、渲染当日榜单图并发送到当前会话。
 2. 主动定时：每天 cron_time（默认 23:00）自动把当天榜单图推送到 target_group。
-3. 榜单口径：按当日 Token 消耗量降序（接口自带的 rank 与 Token 量并不一致，
-   插件不信这个字段，一律自己重排）。
+3. 榜单口径：接口同时给出 data.ranking（Token 用量榜）与 data.spending_ranking
+   （消耗额度榜）时，两个榜并排画进同一张图；只有一套时退化为单榜。
+   排名一律按指标自己重排（接口自带的 rank 与该榜的排序字段并不一致，插件不信它）。
 4. 数据缓存：cache_ttl 秒内复用同一份数据，既防群友狂点，也避免定时任务与
    手动指令并发把接口刷爆。
 5. 图片渲染：默认用内置的本地渲染器直接画图（纯 Pillow，不联网、不依赖
@@ -81,6 +82,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "target_group": "",
     "platform_id": "aiocqhttp",
     "show_cost": True,
+    "panels": "dual",
     "brand": "WorldCodes",
     "image_width": 880,
     "image_format": "png",
@@ -122,8 +124,10 @@ def _get_local_renderer():
             raise RuntimeError("无法为 local_render.py 创建模块规格")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        _LOCAL_RENDERER = module.render_leaderboard
-        logger.info("[SpendingRank] 本地渲染器已就绪（纯 Pillow，不依赖网络）")
+        if not hasattr(module, "render_panels"):
+            raise RuntimeError("local_render.py 缺少 render_panels（版本过旧）")
+        _LOCAL_RENDERER = module
+        logger.info("[SpendingRank] 本地渲染器已就绪（纯 Pillow，不依赖网络，支持双榜）")
     except Exception as exc:
         _LOCAL_RENDERER_ERROR = str(exc)
         logger.warning(f"[SpendingRank] 本地渲染器加载失败，只能用远端渲染：{exc}")
@@ -224,7 +228,7 @@ class SpendingRankPlugin(Star):
         self.config = config if config is not None else {}
 
         # ---- 数据缓存（cache_ttl 秒内复用）----
-        self._cache_rows: list[dict] = []
+        self._cache_panels: list[dict] = []
         self._cache_meta: dict = {}
         self._cache_ts: float = 0.0
         self._cache_lock = asyncio.Lock()
@@ -390,28 +394,9 @@ class SpendingRankPlugin(Star):
 
         return payload, None
 
-    def _normalize(self, payload: Any) -> tuple[list[dict], dict]:
-        """把原始 payload 归一化成模板需要的行数据与汇总信息。"""
-        raw_list = _extract_list(payload)
-
-        date_text = ""
-        if isinstance(payload, dict):
-            # 日期可能在顶层，也可能在 data 里（真实接口是 data.date）
-            nodes = [payload]
-            inner = payload.get("data")
-            if isinstance(inner, dict):
-                nodes.append(inner)
-            for node in nodes:
-                value = _pick(
-                    node, ("date", "day", "stat_date", "statDate", "today", "biz_date"), ""
-                )
-                text = str(value).strip() if value else ""
-                if text:
-                    date_text = text
-                    break
-        if not date_text:
-            date_text = datetime.now().strftime("%Y-%m-%d")
-
+    @staticmethod
+    def _rows_from_list(raw_list: list, sort_key: str = "tokens") -> tuple[list[dict], dict]:
+        """把单条榜单数组归一化成行数据，并算出合计。"""
         rows: list[dict] = []
         total_cost = 0.0
         total_tokens = 0
@@ -486,75 +471,170 @@ class SpendingRankPlugin(Star):
                 }
             )
 
-        # 榜单口径 = 当日 Token 消耗量。接口返回的 rank 字段与 Token 量并不一致，
-        # 所以这里一律按 total_tokens 重新排序；Token 相同再看金额、请求次数。
-        rows.sort(key=lambda row: (row["tokens"], row["cost"], row["requests"]), reverse=True)
+        # 两个榜的排序口径不同：Token 榜看 Token 量，消耗榜看实际扣费。
+        # 接口给的 rank 字段和这两者都不一定一致，所以一律自己重排。
+        if sort_key == "cost":
+            rows.sort(key=lambda row: (row["cost"], row["tokens"], row["requests"]), reverse=True)
+        else:
+            rows.sort(key=lambda row: (row["tokens"], row["cost"], row["requests"]), reverse=True)
 
-        meta = {
-            "date": date_text,
+        sums = {
             "total_cost": total_cost,
             "total_cost_display": _fmt_cost(total_cost),
             "total_tokens": total_tokens,
             "total_tokens_display": _fmt_tokens(total_tokens),
             "total_requests": total_requests,
+        }
+        return rows, sums
+
+    @staticmethod
+    def _date_text(payload: Any) -> str:
+        """从 payload 里取统计日期，取不到就用今天。"""
+        if isinstance(payload, dict):
+            # 日期可能在顶层，也可能在 data 里（真实接口是 data.date）
+            nodes = [payload]
+            inner = payload.get("data")
+            if isinstance(inner, dict):
+                nodes.append(inner)
+            for node in nodes:
+                value = _pick(
+                    node, ("date", "day", "stat_date", "statDate", "today", "biz_date"), ""
+                )
+                text = str(value).strip() if value else ""
+                if text:
+                    return text
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def _normalize(self, payload: Any) -> tuple[list[dict], dict]:
+        """兼容旧口径：只归一化单个榜（优先 data.ranking）。"""
+        inner = payload.get("data") if isinstance(payload, dict) else None
+        raw_list = inner.get("ranking") if isinstance(inner, dict) else None
+        if not isinstance(raw_list, list):
+            raw_list = _extract_list(payload)
+        rows, sums = self._rows_from_list(raw_list, "tokens")
+        meta = {
+            "date": self._date_text(payload),
+            **sums,
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         return rows, meta
 
+    def _panel_mode(self) -> str:
+        """panels 配置：dual（两个榜并排）/ tokens（只看 Token 榜）/ cost（只看消耗榜）。"""
+        mode = str(self._cfg("panels", DEFAULT_CONFIG["panels"]) or "").strip().lower()
+        return mode if mode in ("dual", "tokens", "cost") else "dual"
+
+    def _panels_from_payload(self, payload: Any) -> tuple[list[dict], dict]:
+        """把接口 payload 拆成渲染器要的榜单面板。
+
+        真实接口一次返回两个榜：data.ranking（按 Token 排）与
+        data.spending_ranking（按扣费排）。只有一个榜时自动退化成单栏。
+        """
+        inner = payload.get("data") if isinstance(payload, dict) else None
+        token_list = inner.get("ranking") if isinstance(inner, dict) else None
+        cost_list = inner.get("spending_ranking") if isinstance(inner, dict) else None
+
+        panels: list[dict] = []
+
+        def _add(raw: list, metric: str, title: str, subtitle: str) -> None:
+            rows, sums = self._rows_from_list(raw, metric)
+            panels.append(
+                {
+                    "title": title,
+                    "metric": metric,
+                    "subtitle": subtitle,
+                    "rows": rows,
+                    "total_rows": len(rows),
+                    "_sums": sums,
+                }
+            )
+
+        if isinstance(token_list, list):
+            _add(token_list, "tokens", "Token 用量榜", "按总 Token 排序")
+        if isinstance(cost_list, list):
+            _add(cost_list, "cost", "消耗额度榜", "按实际扣费排序")
+
+        if not panels:
+            _add(_extract_list(payload), "tokens", "Token 用量榜", "按总 Token 排序")
+
+        mode = self._panel_mode()
+        if mode != "dual":
+            picked = [p for p in panels if p["metric"] == mode]
+            panels = picked or panels[:1]
+
+        first = panels[0]
+        meta = {
+            "date": self._date_text(payload),
+            **first["_sums"],
+            "total_users": max(panel.get("total_rows", 0) for panel in panels),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        return panels, meta
+
     async def _fetch_leaderboard(self, force: bool = False) -> tuple[list[dict], dict, Optional[str]]:
-        """返回 (top 行数据, 汇总信息, 错误信息)。"""
+        """返回 (榜单面板, 汇总信息, 错误信息)。"""
         ttl = self._cfg_int("cache_ttl", 300)
         if ttl < 0:
             ttl = 0
 
         def _fresh() -> bool:
-            return bool(self._cache_rows) and (time.time() - self._cache_ts) < ttl
+            return bool(self._cache_panels) and (time.time() - self._cache_ts) < ttl
 
         if not force and _fresh():
-            return self._cache_rows, self._cache_meta, None
+            return self._cache_panels, self._cache_meta, None
 
         async with self._cache_lock:
             # 双重检查：等高并发时只有一个协程真正去打接口
             if not force and _fresh():
-                return self._cache_rows, self._cache_meta, None
+                return self._cache_panels, self._cache_meta, None
 
             payload, error = await self._request_api()
             if error:
                 return [], {}, error
 
-            all_rows, meta = self._normalize(payload)
+            panels, meta = self._panels_from_payload(payload)
+            for panel in panels:
+                panel.pop("_sums", None)
 
-            if not all_rows:
+            if not any(panel.get("rows") for panel in panels):
                 # 空榜单同样写缓存，避免群里反复点到空数据时把接口刷爆
-                self._cache_rows, self._cache_meta = [], meta
+                self._cache_panels, self._cache_meta = [], meta
                 self._cache_ts = time.time()
                 return [], meta, None
 
             top_n = max(1, self._cfg_int("top_n", 10))
-            top_rows = all_rows[:top_n]
-            for rank, row in enumerate(top_rows, start=1):
-                row["rank"] = rank
-                row["rank_class"] = f"top{rank}" if rank <= 3 else ""
+            for panel in panels:
+                top_rows = panel["rows"][:top_n]
+                for rank, row in enumerate(top_rows, start=1):
+                    row["rank"] = rank
+                    row["rank_class"] = "top%d" % rank if rank <= 3 else ""
+                panel["rows"] = top_rows
 
-            meta["total_users"] = len(all_rows)
-
-            self._cache_rows, self._cache_meta = top_rows, meta
+            self._cache_panels, self._cache_meta = panels, meta
             self._cache_ts = time.time()
+            detail = "，".join("%s %d 人" % (p["title"], p.get("total_rows", 0)) for p in panels)
             logger.info(
-                f"[SpendingRank] 榜单数据已更新：{meta.get('date')} 共 {len(all_rows)} 人，"
-                f"本次展示前 {len(top_rows)} 名"
+                f"[SpendingRank] 榜单数据已更新：{meta.get('date')}，{detail}，"
+                f"本次每榜展示前 {top_n} 名"
             )
-            return top_rows, meta, None
+            return panels, meta, None
 
     # ------------------------------------------------------------------
     # 渲染
     # ------------------------------------------------------------------
-    def _build_tmpl_data(self, rows: list[dict], meta: dict) -> dict:
-        """构造交给 t2i 模板的数据。"""
+    def _build_tmpl_data(self, panels: list[dict], meta: dict) -> dict:
+        """构造交给 t2i 模板的数据。
+
+        远端模板只画第一个榜（rows 为兼容旧模板保留），完整双榜数据放在 panels，
+        自建模板可以按需渲染。
+        """
+        first = panels[0] if panels else {"rows": [], "title": "", "metric": "tokens"}
+        rows = first.get("rows") or []
         return {
             "brand": str(self._cfg("brand") or DEFAULT_CONFIG["brand"]),
             "date": meta.get("date", ""),
             "rows": rows,
+            "panels": panels,
             "updated_at": meta.get("updated_at", ""),
             "total_users": meta.get("total_users", len(rows)),
             "total_tokens_display": meta.get("total_tokens_display", "0"),
@@ -644,15 +724,15 @@ class SpendingRankPlugin(Star):
                 )
         raise RenderError(f"下载榜单图片失败：{last_error}")
 
-    def _render_local(self, rows: list[dict], meta: dict) -> bytes:
+    def _render_local(self, panels: list[dict], meta: dict) -> bytes:
         """本地渲染（纯 Pillow，同步阻塞）。"""
         renderer = _get_local_renderer()
         if renderer is None:
             raise RenderError(_LOCAL_RENDERER_ERROR or "本地渲染器不可用")
 
         options = self._render_options()
-        return renderer(
-            rows,
+        return renderer.render_panels(
+            panels,
             meta,
             brand=str(self._cfg("brand") or DEFAULT_CONFIG["brand"]),
             image_width=max(320, self._cfg_int("image_width", 880)),
@@ -661,10 +741,10 @@ class SpendingRankPlugin(Star):
             image_quality=int(options.get("quality", 92)),
         )
 
-    async def _render_remote(self, rows: list[dict], meta: dict) -> bytes:
+    async def _render_remote(self, panels: list[dict], meta: dict) -> bytes:
         """远端渲染：AstrBot 自带的 html_render，失败再直连 t2i_endpoint。"""
         tmpl = self._template_text()
-        tmpl_data = self._build_tmpl_data(rows, meta)
+        tmpl_data = self._build_tmpl_data(panels, meta)
         options = self._render_options()
         timeout = self._cfg_float("render_timeout", 60) or 60.0
 
@@ -700,7 +780,7 @@ class SpendingRankPlugin(Star):
             except Exception as exc:
                 raise RenderError(f"渲染结果下载失败：{exc}") from exc
 
-    async def _render_image(self, rows: list[dict], meta: dict) -> bytes:
+    async def _render_image(self, panels: list[dict], meta: dict) -> bytes:
         """渲染成图片字节流，通道顺序由 render_mode 决定。
 
         auto   ：本地优先，本地挂了再走远端
@@ -719,7 +799,7 @@ class SpendingRankPlugin(Star):
         if mode in ("auto", "local"):
             try:
                 # Pillow 绘制是同步阻塞的，丢到线程池里跑，别卡住事件循环
-                return await asyncio.to_thread(self._render_local, rows, meta)
+                return await asyncio.to_thread(self._render_local, panels, meta)
             except Exception as exc:
                 errors.append(f"本地渲染失败：{exc}")
                 logger.warning(f"[SpendingRank] 本地渲染失败：{exc}")
@@ -727,29 +807,38 @@ class SpendingRankPlugin(Star):
                     raise RenderError("；".join(errors)) from exc
 
         try:
-            return await self._render_remote(rows, meta)
+            return await self._render_remote(panels, meta)
         except Exception as exc:
             errors.append(f"远端渲染失败：{exc}")
 
         raise RenderError("；".join(errors) or "渲染失败")
 
     @staticmethod
-    def _plain_leaderboard(rows: list[dict], meta: dict, brand: str, show_cost: bool) -> str:
-        """出图全线失败时的兜底：纯文字榜单，至少让群里看到数据。"""
-        lines = [f"🏆 {brand} 今日榜单 · {meta.get('date', '')}", ""]
-        for index, row in enumerate(rows, start=1):
-            rank = row.get("rank") or index
-            parts = [
-                f"{rank}. {row.get('name') or '匿名用户'}",
-                f"{row.get('tokens_display') or '0'} tokens",
-                f"{row.get('requests_display') or '0'} 次",
-            ]
-            if show_cost:
-                parts.append("$" + str(row.get("cost_display") or "0"))
-            lines.append("  ·  ".join(parts))
+    def _plain_leaderboard(panels: list[dict], meta: dict, brand: str, show_cost: bool) -> str:
+        """出图全线失败时的兜底：纯文字榜单，双榜就上下分段。"""
+        lines = [f"🏆 {brand} 今日榜单 · {meta.get('date', '')}"]
+        multi = len(panels) > 1
+
+        for panel in panels:
+            rows = panel.get("rows") or []
+            if multi:
+                lines.extend(["", f"【{panel.get('title') or '榜单'}】"])
+            if not rows:
+                lines.append("  今天还没有人上榜")
+                continue
+            for index, row in enumerate(rows, start=1):
+                rank = row.get("rank") or index
+                parts = [
+                    f"{rank}. {row.get('name') or '匿名用户'}",
+                    f"{row.get('tokens_display') or '0'} tokens",
+                    f"{row.get('requests_display') or '0'} 次",
+                ]
+                if show_cost:
+                    parts.append("$" + str(row.get("cost_display") or "0"))
+                lines.append("  ·  ".join(parts))
 
         tail = (
-            f"上榜 {meta.get('total_users', len(rows))} 人"
+            f"共 {meta.get('total_users', 0)} 人上榜"
             f" · 合计 Token {meta.get('total_tokens_display', '0')}"
         )
         if show_cost:
@@ -792,17 +881,17 @@ class SpendingRankPlugin(Star):
             logger.warning("[SpendingRank] 已到播报时间，但 target_group 未配置，跳过本次推送")
             return
 
-        rows, meta, error = await self._fetch_leaderboard(force=True)
+        panels, meta, error = await self._fetch_leaderboard(force=True)
         if error:
             logger.error(f"[SpendingRank] 定时播报拉取数据失败：{error}")
             return
-        if not rows:
+        if not any(panel.get("rows") for panel in panels):
             logger.info("[SpendingRank] 今日暂无消费记录，跳过定时播报")
             return
 
         chain: Any
         try:
-            png = await self._render_image(rows, meta)
+            png = await self._render_image(panels, meta)
             b64 = base64.b64encode(png).decode("ascii")
             chain = MessageChain([Image.fromBase64(b64)])
         except Exception as exc:
@@ -811,7 +900,7 @@ class SpendingRankPlugin(Star):
                 chain = MessageChain([
                     Plain(
                         self._plain_leaderboard(
-                            rows,
+                            panels,
                             meta,
                             str(self._cfg("brand") or DEFAULT_CONFIG["brand"]),
                             self._cfg_bool("show_cost", True),
@@ -841,22 +930,22 @@ class SpendingRankPlugin(Star):
     async def cmd_spending_rank(self, event: AstrMessageEvent):
         """查看当日全站消费排行榜"""
         try:
-            rows, meta, error = await self._fetch_leaderboard()
+            panels, meta, error = await self._fetch_leaderboard()
             if error:
                 yield event.plain_result(f"❌ 排行榜获取失败：{error}")
                 return
-            if not rows:
+            if not any(panel.get("rows") for panel in panels):
                 yield event.plain_result("📭 今日暂无消费记录，榜单还是空的哦～")
                 return
 
             try:
-                png = await self._render_image(rows, meta)
+                png = await self._render_image(panels, meta)
             except RenderError as exc:
                 # 三条渲染通道全挂也不让群友白等：降级成纯文字榜单
                 logger.error(f"[SpendingRank] 渲染失败，降级为纯文字：{exc}")
                 yield event.plain_result(
                     self._plain_leaderboard(
-                        rows,
+                        panels,
                         meta,
                         str(self._cfg("brand") or DEFAULT_CONFIG["brand"]),
                         self._cfg_bool("show_cost", True),

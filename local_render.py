@@ -8,11 +8,12 @@
 这里的实现**不联网、不依赖浏览器**，只要求装了 Pillow（AstrBot 自带），
 所以永远不会因为外部服务抽风而失败。
 
-把 template.html 的版式用 Pillow 重画了一遍：同一个深蓝→青绿渐变、同样的
-列宽比例、同样的前三名高亮。分辨率按 2 倍超采样绘制再缩回，圆角和文字都
-没有锯齿。
+版式用 Pillow 重画：深蓝→青绿渐变底、前三名金银铜高亮、主指标发光。
+支持单榜与双榜并排（一张图里左右两个榜），分辨率按 2 倍超采样绘制再缩回。
 
-对外只有一个函数：render_leaderboard(...) -> bytes
+对外入口：
+    render_panels(panels, meta, ...) -> bytes     # 一个或多个面板并排
+    render_leaderboard(rows, meta, ...) -> bytes  # 单榜，兼容旧调用
 """
 from __future__ import annotations
 
@@ -36,37 +37,6 @@ BRONZE = (232, 165, 107)
 BG_STOPS = ((0.0, (16, 23, 37)), (0.55, (22, 35, 58)), (1.0, (18, 48, 60)))
 
 SCALE = 2  # 超采样倍数
-
-# 版式常量（未乘 SCALE，单位 = 最终图上的像素）
-PAD_X = 40
-PAD_TOP = 34
-PAD_BOTTOM = 38
-RADIUS = 14
-HEADER_GAP = 22
-FOOTER_GAP = 20
-FOOTER_PAD = 16
-
-BRAND_SIZE = 34
-SUB_SIZE = 19
-HEAD_SIZE = 17
-NAME_SIZE = 23
-NUM_SIZE = 20
-COST_SIZE = 23
-RANK_SIZE = 25
-FOOT_SIZE = 17
-
-ROW_PAD_H = 22
-ROW_PAD_V = 12
-HEAD_PAD_V = 13
-COL_GAP = 12
-
-COL_RANK = 62
-COL_TOKENS = 128
-COL_REQ = 92
-COL_COST = 138
-
-COL_TOKENS_NC = 150
-COL_REQ_NC = 108
 
 
 # ---------------------------------------------------------------- 字体
@@ -255,7 +225,7 @@ def _glow_text(
     radius: float = 5.0,
     alpha: int = 130,
 ) -> None:
-    """带柔和发光的文字（消耗列）。"""
+    """带柔和发光的文字（主指标列）。"""
     if not text:
         return
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
@@ -264,44 +234,395 @@ def _glow_text(
     ImageDraw.Draw(img).text(xy, text, font=font, fill=(*color, 255), anchor=anchor)
 
 
-# ---------------------------------------------------------------- 主渲染
+def _draw_kv(d, x, y, label, value, f_label, f_value, value_color, label_color) -> int:
+    """画「标签 + 值」，返回下一个元素的起始 x。"""
+    d.text((x, y), label, font=f_label, fill=label_color, anchor="lm")
+    x += int(f_label.getlength(label)) + _s(5)
+    d.text((x, y), value, font=f_value, fill=(*value_color, 255), anchor="lm")
+    x += int(f_value.getlength(value)) + _s(20)
+    return x
 
-def _layout(row_count: int, show_cost: bool, width: int) -> dict:
-    """把所有尺寸算出来，绘制和高度计算共用一份，避免两边对不上。"""
-    row_h = _s(int(NAME_SIZE * 1.42) + 2 * ROW_PAD_V)
-    head_h = _s(int(HEAD_SIZE * 1.42) + 2 * HEAD_PAD_V)
-    header_h = _s(int(BRAND_SIZE * 1.2) + 16 + 2)
-    footer_text_h = _s(int(FOOT_SIZE * 1.42))
-    footer_h = _s(FOOTER_GAP + FOOTER_PAD) + _s(1) + footer_text_h
 
-    board_h = head_h + row_count * row_h + _s(2)
-    total_h = _s(PAD_TOP) + header_h + _s(HEADER_GAP) + board_h + footer_h + _s(PAD_BOTTOM)
+# ---------------------------------------------------------------- 版式规划
 
-    inner_left = _s(PAD_X + 1 + ROW_PAD_H)
-    inner_right = _s(width - PAD_X - 1 - ROW_PAD_H)
-    inner_w = inner_right - inner_left
-    gap = _s(COL_GAP)
+def _plan(panels: Sequence[dict], show_cost: bool, image_width: int) -> dict:
+    """把宽度、字体、列宽一次算好，绘制与高度计算共用同一份。"""
+    n = max(1, len(panels))
+    dual = n >= 2
+    base = int(image_width or 880)
 
-    if show_cost:
-        fixed = COL_RANK + COL_TOKENS + COL_REQ + COL_COST
+    if dual:
+        # 双榜：每栏至少 600，否则用户列会窄到只能放省略号
+        panel_w = max(600, int(round(base * 0.76)))
+        pad_x = 28
+        panel_gap = 24
+        fs = dict(brand=30, sub=17, title=19, head=16, name=21, num=19,
+                  cost=21, rank=23, foot=16)
+        geo = dict(rank=46, gap=10, row_v=11, head_v=12, row_pad_h=20, title_h=38,
+                   radius=14, head_gap=20)
+        col_w = dict(tokens=96, cost=104, requests=84)
     else:
-        fixed = COL_RANK + COL_TOKENS_NC + COL_REQ_NC
-    name_w = inner_w - _s(fixed) - 4 * gap
+        panel_w = max(760, base)
+        pad_x = 40
+        panel_gap = 0
+        fs = dict(brand=34, sub=19, title=0, head=17, name=23, num=20,
+                  cost=23, rank=25, foot=17)
+        geo = dict(rank=62, gap=12, row_v=12, head_v=13, row_pad_h=22, title_h=0,
+                   radius=14, head_gap=22)
+        col_w = dict(tokens=128, cost=138, requests=92)
 
-    return {
-        "w": _s(width),
-        "h": total_h,
-        "row_h": row_h,
-        "head_h": head_h,
-        "header_h": header_h,
-        "board_top": _s(PAD_TOP) + header_h + _s(HEADER_GAP),
-        "board_h": board_h,
-        "inner_left": inner_left,
-        "inner_right": inner_right,
-        "name_w": name_w,
-        "gap": gap,
-        "max_name_w": max(_s(60), name_w),
-    }
+    total_w = pad_x * 2 + panel_w * n + panel_gap * (n - 1)
+
+    # 面板内部可用宽度
+    inner_pad = 1 + geo["row_pad_h"]
+    inner_w = panel_w - 2 * inner_pad
+
+    # 每一栏的列：双榜只放「主指标 + 次指标」，单榜放三列
+    def columns_for(panel: dict) -> list[dict]:
+        metric = str(panel.get("metric") or "tokens")
+        cols: list[dict] = []
+        if dual or not show_cost:
+            first = "tokens" if metric == "tokens" else "cost"
+            second = "cost" if metric == "tokens" else "tokens"
+            cols.append(dict(key=first, w=col_w[first], primary=True,
+                             label="TOKEN" if first == "tokens" else "消耗"))
+            if show_cost or second != "cost":
+                cols.append(dict(key=second, w=col_w[second], primary=False,
+                                 label="消耗" if second == "cost" else "TOKEN"))
+        else:
+            # 单榜：主指标紧挨用户列排最左，再跟请求，次指标放最后
+            first = "tokens" if metric == "tokens" else "cost"
+            second = "cost" if first == "tokens" else "tokens"
+            cols.append(dict(key=first, w=col_w[first], primary=True,
+                             label="TOKEN" if first == "tokens" else "消耗"))
+            cols.append(dict(key="requests", w=col_w["requests"], primary=False, label="请求"))
+            cols.append(dict(key=second, w=col_w[second], primary=False,
+                             label="消耗" if second == "cost" else "TOKEN"))
+        return cols
+
+    return dict(
+        n=n, dual=dual, panel_w=panel_w, pad_x=pad_x, panel_gap=panel_gap,
+        total_w=total_w, inner_w=inner_w, inner_pad=inner_pad, fs=fs, geo=geo,
+        columns_for=columns_for, show_cost=show_cost,
+    )
+
+
+def _fit_columns(plan: dict, cols: list[dict], panel: dict) -> None:
+    """按该榜实际最长的数字放宽列宽。
+
+    金额位数是会变的（$6.5327 和 $818.0253 差出好几个字符），列宽写死时
+    长金额会把它的 $ 挤进左边一列，看起来像两个数字粘在一起。
+    """
+    rows = panel.get("rows") or []
+    if not rows:
+        return
+
+    fs = plan["fs"]
+    f_cost = _font(_s(fs["cost"]), bold=True, mono=True)
+    f_cur = _font(_s(int(fs["cost"] * 0.78)), mono=True)
+    f_num = _font(_s(fs["num"]), mono=True)
+    cur_w = f_cur.getlength("$")
+
+    need = {"cost": 0.0, "tokens": 0.0}
+    for row in rows:
+        cost_txt = str(row.get("cost_display") or "0")
+        need["cost"] = max(need["cost"], cur_w + f_cost.getlength(cost_txt) + _s(7))
+        need["tokens"] = max(
+            need["tokens"], f_num.getlength(str(row.get("tokens_display") or "0")) + _s(6)
+        )
+
+    for col in cols:
+        want = need.get(col["key"], 0.0)
+        if want > 0:
+            col["w"] = max(col["w"], int(want / SCALE) + 2)
+
+
+def _col_positions(plan: dict, panel: dict, x0: int, x1: int) -> list[dict]:
+    """从右往左排列表头/数字列，返回带右边界坐标的列信息。"""
+    geo = plan["geo"]
+    gap = _s(geo["gap"])
+    right = x1 - _s(plan["inner_pad"])
+    cols = plan["columns_for"](panel)
+    _fit_columns(plan, cols, panel)
+    out = []
+    for col in reversed(cols):
+        w = _s(col["w"])
+        out.append(dict(col, x_right=right, w=w))
+        right -= w + gap
+    out.reverse()
+    return out
+
+
+def _name_span(plan: dict, cols: list[dict], x0: int) -> tuple[int, int]:
+    """用户列可用的 x 起点与宽度。"""
+    geo = plan["geo"]
+    gap = _s(geo["gap"])
+    name_x = x0 + _s(plan["inner_pad"]) + _s(geo["rank"]) + gap
+    if cols:
+        limit = cols[0]["x_right"] - cols[0]["w"] - gap
+    else:
+        limit = x0 + _s(plan["panel_w"] - plan["inner_pad"])
+    return name_x, max(_s(50), limit - name_x)
+
+
+# ---------------------------------------------------------------- 面板绘制
+
+TOP_STOPS = {
+    1: ((0.0, (255, 242, 207)), (0.55, (255, 216, 130)), (1.0, (224, 165, 60))),
+    2: ((0.0, (255, 255, 255)), (0.55, (207, 224, 238)), (1.0, (147, 169, 189))),
+    3: ((0.0, (255, 220, 180)), (0.55, (232, 165, 107)), (1.0, (192, 122, 60))),
+}
+TOP_TINT = {1: GOLD, 2: SILVER, 3: BRONZE}
+TOP_ALPHA = {1: 50, 2: 40, 3: 40}
+
+_DIM = (232, 238, 245, 102)
+_SOFT = (232, 238, 245, 158)
+
+
+def _draw_panel(d, layer, plan: dict, panel: dict, x0: int, y0: int,
+                x1: int, row_count: int, show_cost: bool) -> int:
+    """画一个榜单面板，返回面板高度（绘制尺寸）。"""
+    fs, geo = plan["fs"], plan["geo"]
+    gap = _s(geo["gap"])
+    row_h = _s(int(fs["name"] * 1.42) + 2 * geo["row_v"])
+    head_h = _s(int(fs["head"] * 1.42) + 2 * geo["head_v"])
+    title_h = _s(geo["title_h"])
+    panel_h = title_h + head_h + row_count * row_h + _s(2)
+
+    # 面板底板
+    d.rounded_rectangle(
+        [x0, y0, x1, y0 + panel_h],
+        radius=_s(geo["radius"]),
+        fill=(255, 255, 255, 14),
+        outline=(255, 255, 255, 24),
+        width=_s(1),
+    )
+
+    left = x0 + _s(plan["inner_pad"])
+    right = x1 - _s(plan["inner_pad"])
+    cols = _col_positions(plan, panel, x0, x1)
+    name_x, name_w = _name_span(plan, cols, x0)
+
+    # 面板标题（双榜才有）
+    if title_h:
+        ty = y0 + title_h // 2
+        title = str(panel.get("title") or "")
+        f_title = _font(_s(fs["title"]), bold=True)
+        accent = MINT if str(panel.get("metric")) == "cost" else CYAN
+        d.rectangle([left, ty - _s(9), left + _s(3), ty + _s(9)], fill=(*accent, 235))
+        d.text((left + _s(12), ty), title, font=f_title, fill=(*TEXT_NAME, 255), anchor="lm")
+        sub = str(panel.get("subtitle") or "")
+        if sub:
+            d.text((right, ty), sub, font=_font(_s(fs["head"])), fill=_DIM, anchor="rm")
+
+    # 表头
+    head_y = y0 + title_h
+    hy = head_y + head_h // 2
+    f_head = _font(_s(fs["head"]))
+    d.text((left, hy), "排名", font=f_head, fill=_DIM, anchor="lm")
+    d.text((name_x, hy), "用户", font=f_head, fill=_DIM, anchor="lm")
+    for col in cols:
+        d.text((col["x_right"], hy), col["label"], font=f_head, fill=_DIM, anchor="rm")
+
+    row_top = head_y + head_h
+    d.rectangle([x0 + _s(1), row_top, x1 - _s(1), row_top + _s(1)], fill=(255, 255, 255, 24))
+
+    f_rank = _font(_s(fs["rank"]), bold=True, mono=True)
+    f_name = _font(_s(fs["name"]))
+    f_name_b = _font(_s(fs["name"]), bold=True)
+    f_num = _font(_s(fs["num"]), mono=True)
+    f_cost = _font(_s(fs["cost"]), bold=True, mono=True)
+    f_cur = _font(_s(int(fs["cost"] * 0.78)), mono=True)
+
+    rows = list(panel.get("rows") or [])
+    for i, row in enumerate(rows):
+        ry0 = row_top + i * row_h
+        ry1 = ry0 + row_h
+        cy = (ry0 + ry1) // 2
+        rank = int(row.get("rank") or (i + 1))
+
+        if 1 <= rank <= 3:
+            tint = TOP_TINT[rank]
+            d.rectangle([x0 + _s(1), ry0, x0 + _s(5), ry1], fill=(*tint, 235))
+            band_x0, band_x1 = x0 + _s(1), x1 - _s(1)
+            band_w = band_x1 - band_x0
+            steps = 32
+            for k in range(steps):
+                bx0 = band_x0 + band_w * k // steps
+                bx1 = band_x0 + band_w * (k + 1) // steps
+                alpha = int(TOP_ALPHA[rank] * (1.0 - k / steps))
+                if alpha > 0:
+                    d.rectangle([bx0, ry0, bx1, ry1], fill=(*tint, alpha))
+
+        # 名次
+        if 1 <= rank <= 3:
+            _gradient_text(layer, (left, cy), str(rank), f_rank, TOP_STOPS[rank], anchor="lm")
+        else:
+            d.text((left, cy), str(rank), font=f_rank, fill=_DIM, anchor="lm")
+
+        # 用户名
+        f_use = f_name_b if rank == 1 else f_name
+        name = _ellipsis(row.get("name") or "匿名用户", f_use, name_w)
+        color = TEXT_TOP1_NAME if rank == 1 else TEXT_NAME
+        d.text((name_x, cy), name, font=f_use, fill=(*color, 255), anchor="lm")
+
+        # 指标列
+        for col in cols:
+            key = col["key"]
+            if key == "cost":
+                txt = str(row.get("cost_display") or "0")
+                if col["primary"]:
+                    d.text((col["x_right"] - f_cost.getlength(txt) - _s(3), cy), "$",
+                           font=f_cur, fill=(*MINT, 190), anchor="rm")
+                    _glow_text(layer, (col["x_right"], cy), txt, f_cost, MINT, anchor="rm")
+                else:
+                    d.text((col["x_right"] - f_cost.getlength(txt) - _s(3), cy), "$",
+                           font=f_cur, fill=(232, 238, 245, 120), anchor="rm")
+                    d.text((col["x_right"], cy), txt, font=f_cost, fill=_SOFT, anchor="rm")
+            elif key == "tokens":
+                txt = str(row.get("tokens_display") or "0")
+                if col["primary"]:
+                    _glow_text(layer, (col["x_right"], cy), txt, f_num, CYAN, anchor="rm")
+                else:
+                    d.text((col["x_right"], cy), txt, font=f_num, fill=_SOFT, anchor="rm")
+            else:
+                d.text((col["x_right"], cy), str(row.get("requests_display") or "0"),
+                       font=f_num, fill=_SOFT, anchor="rm")
+
+        if i < len(rows) - 1:
+            d.rectangle([x0 + _s(1), ry1, x1 - _s(1), ry1 + _s(1)], fill=(255, 255, 255, 14))
+
+    if not rows:
+        d.text(((left + right) // 2, row_top + row_count * row_h // 2), "今天还没有人上榜",
+               font=_font(_s(fs["name"])), fill=(232, 238, 245, 110), anchor="mm")
+
+    return panel_h
+
+
+# ---------------------------------------------------------------- 主入口
+
+def render_panels(
+    panels: Sequence[dict],
+    meta: dict,
+    *,
+    brand: str = "WorldCodes",
+    image_width: int = 880,
+    show_cost: bool = True,
+    image_format: str = "png",
+    image_quality: int = 92,
+) -> bytes:
+    """把一到两个榜单面板画进同一张图，返回编码后的字节。
+
+    panels 每项：{"title": 面板标题, "metric": "tokens"|"cost", "rows": [...]}
+    两个面板时会左右并排（左边通常是 Token 榜，右边是消耗榜）。
+    """
+    clean = [p for p in (panels or []) if isinstance(p, dict)]
+    if not clean:
+        clean = [dict(title="", metric="tokens", rows=[])]
+
+    plan = _plan(clean, show_cost, image_width)
+    fs, geo = plan["fs"], plan["geo"]
+
+    row_n = max(1, max([len(p.get("rows") or []) for p in clean] + [1]))
+    row_h = _s(int(fs["name"] * 1.42) + 2 * geo["row_v"])
+    head_h = _s(int(fs["head"] * 1.42) + 2 * geo["head_v"])
+    title_h = _s(geo["title_h"])
+    panel_h = title_h + head_h + row_n * row_h + _s(2)
+
+    header_h = _s(int(fs["brand"] * 1.2) + 16 + 2)
+    footer_h = _s(20 + 16) + _s(1) + _s(int(fs["foot"] * 1.42))
+    total_h = _s(34) + header_h + _s(geo["head_gap"]) + panel_h + footer_h + _s(38)
+
+    W, H = _s(plan["total_w"]), total_h
+    img = Image.new("RGB", (W, H))
+    img.paste(_vertical_gradient((W, H), BG_STOPS))
+
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    pad_x = _s(plan["pad_x"])
+    right_edge = _s(plan["total_w"] - plan["pad_x"])
+
+    # ---------- 顶栏：品牌 + 副标题 ----------
+    brand = str(brand or "")
+    split = min(5, len(brand))
+    f_brand = _font(_s(fs["brand"]), bold=True)
+    base_y = _s(34)
+    anchor_y = base_y + _s(int(fs["brand"] * 0.62))
+    head_cut, tail_cut = brand[:split], brand[split:]
+    d.text((pad_x, anchor_y), head_cut, font=f_brand, fill=(*CYAN, 255), anchor="lm")
+    if tail_cut:
+        d.text((pad_x + f_brand.getlength(head_cut), anchor_y), tail_cut,
+               font=f_brand, fill=(*GOLD, 255), anchor="lm")
+
+    f_sub = _font(_s(fs["sub"]))
+    date_txt = str(meta.get("date", ""))
+    top_n = max([len(p.get("rows") or []) for p in clean] + [0])
+    sub_room = right_edge - (pad_x + f_brand.getlength(brand)) - _s(16)
+    if len(clean) > 1:
+        kinds = "全站双榜"
+    elif str(clean[0].get("metric")) == "cost":
+        kinds = "全站消耗榜"
+    else:
+        kinds = "全站 Token 榜"
+    sub = "TOP {}".format(top_n)
+    for candidate in (
+        "{}  ·  {}  ·  TOP {}".format(kinds, date_txt, top_n),
+        "{}  ·  TOP {}".format(date_txt, top_n),
+    ):
+        if f_sub.getlength(candidate) <= sub_room:
+            sub = candidate
+            break
+    d.text((right_edge, anchor_y), sub, font=f_sub, fill=(232, 238, 245, 150), anchor="rm")
+
+    sep_y = _s(34) + header_h - _s(2)
+    d.rectangle([pad_x, sep_y, right_edge, sep_y + _s(1)], fill=(255, 255, 255, 34))
+
+    # ---------- 各面板 ----------
+    board_top = _s(34) + header_h + _s(geo["head_gap"])
+    for idx, panel in enumerate(clean):
+        x0 = pad_x + idx * (_s(plan["panel_w"]) + _s(plan["panel_gap"]))
+        x1 = x0 + _s(plan["panel_w"])
+        _draw_panel(d, layer, plan, panel, x0, board_top, x1, row_n, show_cost)
+
+    # ---------- 底部汇总 ----------
+    foot_top = board_top + panel_h + _s(20)
+    d.rectangle([pad_x, foot_top, right_edge, foot_top + _s(1)], fill=(255, 255, 255, 34))
+    fy = foot_top + _s(16) + _s(int(fs["foot"] * 0.7))
+
+    f_foot = _font(_s(fs["foot"]))
+    f_foot_b = _font(_s(fs["foot"]), bold=True)
+    grey = (232, 238, 245, 128)
+
+    x = pad_x
+    x = _draw_kv(d, x, fy, "上榜", "{} 人".format(meta.get("total_users", top_n)),
+                 f_foot, f_foot_b, GOLD, grey)
+    x = _draw_kv(d, x, fy, "合计 Token", str(meta.get("total_tokens_display", "0")),
+                 f_foot, f_foot_b, GOLD, grey)
+    if show_cost:
+        x = _draw_kv(d, x, fy, "合计消耗", "$" + str(meta.get("total_cost_display", "0")),
+                     f_foot, f_foot_b, GOLD, grey)
+
+    updated = str(meta.get("updated_at", ""))
+    hhmm = updated[11:16] if len(updated) >= 16 else updated
+    for candidate in ("数据更新于 " + updated, "更新于 " + hhmm, "更新 " + hhmm):
+        if x + _s(16) + f_foot.getlength(candidate) <= right_edge:
+            d.text((right_edge, fy), candidate, font=f_foot,
+                   fill=(232, 238, 245, 130), anchor="rm")
+            break
+
+    # ---------- 合成 ----------
+    out = Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
+    if SCALE != 1:
+        out = out.resize((plan["total_w"], total_h // SCALE), Image.Resampling.LANCZOS)
+
+    fmt = str(image_format or "png").lower()
+    buf = BytesIO()
+    if fmt in ("jpg", "jpeg"):
+        q = min(max(int(image_quality or 92), 30), 100)
+        out.save(buf, format="JPEG", quality=q, subsampling=0, optimize=True)
+    else:
+        out.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
 
 
 def render_leaderboard(
@@ -314,223 +635,13 @@ def render_leaderboard(
     image_format: str = "png",
     image_quality: int = 92,
 ) -> bytes:
-    """把榜单数据画成图片，返回编码后的字节。"""
-    # 宽度下限 760：再窄的话「用户」列会被压到十几个像素，名字全变成省略号
-    width = max(760, int(image_width or 880))
-    rows = list(rows or [])
-    # 空榜时也留一行位置，用来画「暂无数据」，避免整块面板塌成一条缝
-    L = _layout(max(1, len(rows)), show_cost, width)
-
-    W, H = L["w"], L["h"]
-    img = Image.new("RGB", (W, H))
-    img.paste(_vertical_gradient((W, H), BG_STOPS))
-
-    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-
-    # ---------- 顶部：品牌 + 日期 ----------
-    brand = str(brand or "")
-    split = min(5, len(brand))
-    f_brand = _font(_s(BRAND_SIZE), bold=True)
-    base_y = _s(PAD_TOP)
-    anchor_y = base_y + _s(int(BRAND_SIZE * 0.62))
-    head_cut = brand[:split]
-    tail_cut = brand[split:]
-    d.text((_s(PAD_X), anchor_y), head_cut, font=f_brand, fill=(*CYAN, 255), anchor="lm")
-    if tail_cut:
-        dx = _s(PAD_X) + f_brand.getlength(head_cut)
-        d.text((dx, anchor_y), tail_cut, font=f_brand, fill=(*GOLD, 255), anchor="lm")
-
-    f_sub = _font(_s(SUB_SIZE))
-    date_txt = str(meta.get("date", ""))
-    sub_right = _s(width - PAD_X)
-    # 副标题右对齐；留够和品牌字之间的距离，挤不下就逐级缩短
-    sub_room = sub_right - (_s(PAD_X) + f_brand.getlength(brand)) - _s(16)
-    sub = "TOP {}".format(len(rows))
-    for candidate in (
-        "全站 Token 榜  ·  {}  ·  TOP {}".format(date_txt, len(rows)),
-        "{}  ·  TOP {}".format(date_txt, len(rows)),
-    ):
-        if f_sub.getlength(candidate) <= sub_room:
-            sub = candidate
-            break
-    d.text((sub_right, anchor_y), sub, font=f_sub, fill=(232, 238, 245, 150), anchor="rm")
-
-    # 顶部隔线
-    sep_y = _s(PAD_TOP) + L["header_h"] - _s(2)
-    d.rectangle([_s(PAD_X), sep_y, _s(width - PAD_X), sep_y + _s(1)], fill=(255, 255, 255, 34))
-
-    # ---------- 榜单面板 ----------
-    top = L["board_top"]
-    d.rounded_rectangle(
-        [_s(PAD_X), top, _s(width - PAD_X), top + L["board_h"]],
-        radius=_s(RADIUS),
-        fill=(255, 255, 255, 14),
-        outline=(255, 255, 255, 24),
-        width=_s(1),
+    """单榜入口（兼容旧调用）。"""
+    return render_panels(
+        [dict(title="", metric="tokens", rows=list(rows or []))],
+        meta,
+        brand=brand,
+        image_width=image_width,
+        show_cost=show_cost,
+        image_format=image_format,
+        image_quality=image_quality,
     )
-
-    left = L["inner_left"]
-    right = L["inner_right"]
-    gap = L["gap"]
-    name_w = L["max_name_w"]
-
-    # 列边界（右对齐列共用）
-    if show_cost:
-        col_tok_r = right - _s(COL_COST) - _s(COL_REQ) - 2 * gap
-        col_req_r = right - _s(COL_COST) - gap
-        col_cost_r = right
-    else:
-        col_tok_r = right - _s(COL_REQ_NC) - gap
-        col_req_r = right
-        col_cost_r = right
-    name_x = left + _s(COL_RANK) + gap
-
-    # ---------- 表头 ----------
-    head_y = top + _s(1)
-    d.rectangle([_s(PAD_X) + _s(1), head_y, _s(width - PAD_X) - _s(1), head_y + L["head_h"]],
-                fill=(255, 255, 255, 9))
-    hy = head_y + L["head_h"] // 2
-    f_head = _font(_s(HEAD_SIZE))
-    dim = (232, 238, 245, 102)
-    d.text((left, hy), "排名", font=f_head, fill=dim, anchor="lm")
-    d.text((name_x, hy), "用户", font=f_head, fill=dim, anchor="lm")
-    d.text((col_tok_r, hy), "TOKEN", font=f_head, fill=dim, anchor="rm")
-    d.text((col_req_r, hy), "请求", font=f_head, fill=dim, anchor="rm")
-    if show_cost:
-        d.text((col_cost_r, hy), "消耗", font=f_head, fill=dim, anchor="rm")
-
-    # 表头与首行之间的分隔线
-    row_top = head_y + L["head_h"]
-    d.rectangle([_s(PAD_X) + _s(1), row_top, _s(width - PAD_X) - _s(1), row_top + _s(1)],
-                fill=(255, 255, 255, 24))
-
-    # ---------- 数据行 ----------
-    f_rank = _font(_s(RANK_SIZE), bold=True, mono=True)
-    f_name = _font(_s(NAME_SIZE))
-    f_name_b = _font(_s(NAME_SIZE), bold=True)
-    f_num = _font(_s(NUM_SIZE), mono=True)
-    f_cost = _font(_s(COST_SIZE), bold=True, mono=True)
-
-    top_stops = {
-        1: ((0.0, (255, 242, 207)), (0.55, (255, 216, 130)), (1.0, (224, 165, 60))),
-        2: ((0.0, (255, 255, 255)), (0.55, (207, 224, 238)), (1.0, (147, 169, 189))),
-        3: ((0.0, (255, 220, 180)), (0.55, (232, 165, 107)), (1.0, (192, 122, 60))),
-    }
-    top_tint = {1: GOLD, 2: SILVER, 3: BRONZE}
-    top_alpha = {1: 50, 2: 40, 3: 40}
-
-    for i, row in enumerate(rows):
-        y0 = row_top + i * L["row_h"]
-        y1 = y0 + L["row_h"]
-        cy = (y0 + y1) // 2
-        rank = int(row.get("rank") or (i + 1))
-
-        if 1 <= rank <= 3:
-            tint = top_tint[rank]
-            a = top_alpha[rank]
-            # 左侧 4px 色条
-            d.rectangle([_s(PAD_X) + _s(1), y0, _s(PAD_X) + _s(5), y1], fill=(*tint, 235))
-            # 由左向右淡出的高亮底色（铺满整行，与 template.html 的 inset 位置一致）
-            band_x0 = _s(PAD_X) + _s(1)
-            band_x1 = _s(width - PAD_X) - _s(1)
-            band_w = band_x1 - band_x0
-            steps = 40
-            for k in range(steps):
-                x0 = band_x0 + band_w * k // steps
-                x1 = band_x0 + band_w * (k + 1) // steps
-                ratio = 1.0 - k / steps
-                alpha = int(a * ratio)
-                if alpha <= 0:
-                    continue
-                d.rectangle([x0, y0, x1, y1], fill=(*tint, alpha))
-
-        # 排名
-        if 1 <= rank <= 3:
-            _gradient_text(layer, (left, cy), str(rank), f_rank, top_stops[rank], anchor="lm")
-        else:
-            d.text((left, cy), str(rank), font=f_rank, fill=(232, 238, 245, 102), anchor="lm")
-
-        # 用户名
-        name = _ellipsis(row.get("name") or "匿名用户", f_name_b if rank == 1 else f_name, name_w)
-        name_color = TEXT_TOP1_NAME if rank == 1 else TEXT_NAME
-        d.text((name_x, cy), name, font=(f_name_b if rank == 1 else f_name),
-               fill=(*name_color, 255), anchor="lm")
-
-        # Token / 请求
-        d.text((col_tok_r, cy), row.get("tokens_display") or "0", font=f_num,
-               fill=(232, 238, 245, 158), anchor="rm")
-        d.text((col_req_r, cy), row.get("requests_display") or "0", font=f_num,
-               fill=(232, 238, 245, 158), anchor="rm")
-
-        # 消耗
-        if show_cost:
-            cost = str(row.get("cost_display") or "0")
-            d.text((col_cost_r - f_cost.getlength(cost) - _s(4), cy), "$", font=_font(_s(18), mono=True),
-                   fill=(*MINT, 190), anchor="rm")
-            _glow_text(layer, (col_cost_r, cy), cost, f_cost, MINT, anchor="rm")
-
-        # 行分隔线
-        if i < len(rows) - 1:
-            d.rectangle([_s(PAD_X) + _s(1), y1, _s(width - PAD_X) - _s(1), y1 + _s(1)],
-                        fill=(255, 255, 255, 14))
-
-    if not rows:
-        d.text(
-            ((left + right) // 2, row_top + L["row_h"] // 2),
-            "今天还没有人上榜",
-            font=_font(_s(NAME_SIZE)),
-            fill=(232, 238, 245, 110),
-            anchor="mm",
-        )
-
-    # ---------- 底部汇总 ----------
-    foot_top = top + L["board_h"] + _s(FOOTER_GAP)
-    d.rectangle([_s(PAD_X), foot_top, _s(width - PAD_X), foot_top + _s(1)],
-                fill=(255, 255, 255, 34))
-    fy = foot_top + _s(FOOTER_PAD) + _s(int(FOOT_SIZE * 0.7))
-
-    f_foot = _font(_s(FOOT_SIZE))
-    f_foot_b = _font(_s(FOOT_SIZE), bold=True)
-    grey = (232, 238, 245, 128)
-
-    x = _s(PAD_X)
-    x = _draw_kv(d, x, fy, "上榜", "{} 人".format(meta.get("total_users", len(rows))), f_foot, f_foot_b, GOLD, grey)
-    x = _draw_kv(d, x, fy, "合计 Token", str(meta.get("total_tokens_display", "0")), f_foot, f_foot_b, GOLD, grey)
-    if show_cost:
-        x = _draw_kv(d, x, fy, "合计消耗", "$" + str(meta.get("total_cost_display", "0")), f_foot, f_foot_b, GOLD, grey)
-
-    # 时间戳右对齐；和左侧汇总挤在一起时逐级缩短，宁可少显示也不要叠字
-    right_edge = _s(width - PAD_X)
-    updated = str(meta.get("updated_at", ""))
-    hhmm = updated[11:16] if len(updated) >= 16 else updated
-    stamp = ""
-    for candidate in ("数据更新于 " + updated, "更新于 " + hhmm, "更新 " + hhmm):
-        if x + _s(16) + f_foot.getlength(candidate) <= right_edge:
-            stamp = candidate
-            break
-    if stamp:
-        d.text((right_edge, fy), stamp, font=f_foot, fill=(232, 238, 245, 130), anchor="rm")
-
-    # ---------- 合成 ----------
-    out = Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
-    if SCALE != 1:
-        out = out.resize((width, H // SCALE), Image.Resampling.LANCZOS)
-
-    fmt = str(image_format or "png").lower()
-    buf = BytesIO()
-    if fmt in ("jpg", "jpeg"):
-        q = min(max(int(image_quality or 92), 30), 100)
-        out.save(buf, format="JPEG", quality=q, subsampling=0, optimize=True)
-    else:
-        out.save(buf, format="PNG", optimize=True)
-    return buf.getvalue()
-
-
-def _draw_kv(d, x, y, label, value, f_label, f_value, value_color, label_color) -> int:
-    """画「标签 + 值」，返回下一个元素的起始 x。"""
-    d.text((x, y), label, font=f_label, fill=label_color, anchor="lm")
-    x += int(f_label.getlength(label)) + _s(5)
-    d.text((x, y), value, font=f_value, fill=(*value_color, 255), anchor="lm")
-    x += int(f_value.getlength(value)) + _s(20)
-    return x
