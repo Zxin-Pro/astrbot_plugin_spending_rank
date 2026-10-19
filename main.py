@@ -524,6 +524,38 @@ class SpendingRankPlugin(Star):
         mode = str(self._cfg("panels", DEFAULT_CONFIG["panels"]) or "").strip().lower()
         return mode if mode in ("dual", "tokens", "cost") else "dual"
 
+    @staticmethod
+    def _union_stats(panels: list[dict]) -> dict:
+        """跨榜去重统计页脚数字。
+
+        两个榜的成员只是部分重叠（高 Token 低单价 / 高单价低 Token 各自成榜），
+        所以「上榜人数」必须按人去重，合计 Token 与合计消耗也只按人累加一次，
+        否则 13 个人上榜会写成人均十人的「10 人」。同一个人在两个榜里的数值
+        本应一致，这里取最大值兜住接口偶发的不一致。
+        """
+        users: dict[str, dict] = {}
+        for panel in panels:
+            for row in panel.get("rows") or []:
+                key = str(row.get("user_id") or "").strip()
+                if not key:
+                    # 接口没给 user_id 时退回昵称（改名会算成两个人，属可接受误差）
+                    key = "name:" + str(row.get("name") or "").strip()
+                entry = users.setdefault(key, {"tokens": 0, "cost": 0.0, "requests": 0})
+                entry["tokens"] = max(entry["tokens"], int(row.get("tokens") or 0))
+                entry["cost"] = max(entry["cost"], float(row.get("cost") or 0.0))
+                entry["requests"] = max(entry["requests"], int(row.get("requests") or 0))
+
+        total_tokens = sum(item["tokens"] for item in users.values())
+        total_cost = sum(item["cost"] for item in users.values())
+        return {
+            "total_users": len(users),
+            "total_tokens": total_tokens,
+            "total_tokens_display": _fmt_tokens(total_tokens),
+            "total_requests": sum(item["requests"] for item in users.values()),
+            "total_cost": round(total_cost, 6),
+            "total_cost_display": _fmt_cost(total_cost),
+        }
+
     def _panels_from_payload(self, payload: Any) -> tuple[list[dict], dict]:
         """把接口 payload 拆成渲染器要的榜单面板。
 
@@ -563,13 +595,11 @@ class SpendingRankPlugin(Star):
             picked = [p for p in panels if p["metric"] == mode]
             panels = picked or panels[:1]
 
-        # 页脚的合计固定取 Token 榜那份（两榜成员可能不完全一致，
-        # 取第一栏会让合计数字随面板顺序漂移）
-        token_panel = next((p for p in panels if p["metric"] == "tokens"), panels[0])
+        # 页脚统计按人去重：同一个人可能同时出现在两个榜上，
+        # 「上榜人数」与两个合计数都只算一次，避免双榜各 10 人、实际 13 人时写成「上榜 10 人」。
         meta = {
             "date": self._date_text(payload),
-            **token_panel["_sums"],
-            "total_users": max(panel.get("total_rows", 0) for panel in panels),
+            **self._union_stats(panels),
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         return panels, meta
@@ -612,6 +642,10 @@ class SpendingRankPlugin(Star):
                     row["rank"] = rank
                     row["rank_class"] = "top%d" % rank if rank <= 3 else ""
                 panel["rows"] = top_rows
+
+            # top_n 可能小于接口实际返回条数，页脚必须按「真正画出来的行」重算，
+            # 否则人数与合计会跟图上的内容对不上。
+            meta.update(self._union_stats(panels))
 
             self._cache_panels, self._cache_meta = panels, meta
             self._cache_ts = time.time()

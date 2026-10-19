@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import os
+import unicodedata
 from io import BytesIO
 from typing import Any, Iterable, Sequence
 
@@ -131,9 +132,25 @@ def _s(v: float) -> int:
     return int(round(v * SCALE))
 
 
+_DROP_CATS = {"So", "Cs", "Cf", "Co"}
+
+
+def _strip_unrenderable(text: str) -> str:
+    """去掉字体里画不出来的字符（emoji、符号、变体选择符、零宽连接符）。
+
+    本地字体没有彩色 emoji 字库，直接留给 Pillow 会画成方块豆腐。
+    """
+    out = []
+    for ch in str(text or ""):
+        if ch in "\u200d\ufe0e\ufe0f" or unicodedata.category(ch) in _DROP_CATS:
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
 def _ellipsis(text: str, font, max_w: int) -> str:
     """单行超宽就截断加省略号。"""
-    text = str(text or "")
+    text = _strip_unrenderable(text)
     if not text:
         return ""
     if font.getlength(text) <= max_w:
