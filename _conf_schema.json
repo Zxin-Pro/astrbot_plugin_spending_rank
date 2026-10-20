@@ -92,8 +92,14 @@
   "render_mode": {
     "description": "出图通道",
     "type": "string",
-    "hint": "auto（默认，推荐）：先用本地渲染器出图，本地不可用才退回远端服务。local：只用本地 Pillow 渲染，完全不联网。remote：只用远端 t2i 服务（旧行为，服务限流 429 / 没节点 503 时会出不了图）。",
+    "hint": "auto（默认，推荐）：先用本地渲染器出图，本地不可用才退回远端服务。local：只用本地 Pillow 渲染，完全不联网。remote：只用远端 t2i 服务（旧行为，服务限流 429 / 没节点 503 时会出不了图）。text：纯文本模式，永不出图，直接发文字榜单。",
     "default": "auto"
+  },
+  "plain_fallback": {
+    "description": "出图失败时自动改发纯文字",
+    "type": "bool",
+    "hint": "默认开启：渲染通道全部失败（缺字体、Pillow 异常、远端服务不可用）时，把同一份榜单数据排版成纯文字发出去，群里不会只收到一条报错。关掉后改为直接提示渲染失败。",
+    "default": true
   },
   "t2i_endpoint": {
     "description": "t2i 渲染服务地址（仅远端通道使用）",

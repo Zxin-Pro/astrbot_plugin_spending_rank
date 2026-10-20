@@ -37,9 +37,10 @@
 （AstrBot 自带）和系统里的中文字体，不受任何外部服务影响。
 
 三条通道全挂时，插件不再只回一句报错，而是把榜单降级成纯文字发出去，
-保证群里至少能看到数据。
+保证群里至少能看到数据。也可以把 render_mode 设成 text，或者发
+/排行榜 文字，直接跳过出图只要文字。
 
-作者：zjh19    版本：v1.4.0
+作者：zjh19    版本：v1.5.0
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -97,6 +99,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "render_mode": "auto",
     "t2i_endpoint": "https://t2i.soulter.top/text2img",
     "render_timeout": 60,
+    "plain_fallback": True,
     "llm_tool_enabled": True,
     "llm_tool_send_image": True,
 }
@@ -190,6 +193,36 @@ def _fmt_cost(cost: float) -> str:
     if cost >= 1000:
         return "{:,.2f}".format(cost)
     return "{:.4f}".format(cost)
+
+
+# 纯文本榜单要按「显示宽度」对齐：中文/全角算 2 列，英文数字算 1 列，
+# 否则「小明」和「alice」混排时右边的数字会参差不齐。
+def _char_width(char: str) -> int:
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+
+def _disp_width(text: str) -> int:
+    """字符串在等宽字体下占几列。"""
+    return sum(_char_width(ch) for ch in text)
+
+
+def _pad_text(text: str, width: int) -> str:
+    """右侧补空格到指定显示宽度。"""
+    return text + " " * max(0, width - _disp_width(text))
+
+
+def _clip_text(text: str, width: int) -> str:
+    """按显示宽度截断，超出部分换成省略号。"""
+    if _disp_width(text) <= width:
+        return text
+    kept, used = "", 0
+    for char in text:
+        size = _char_width(char)
+        if used + size > max(1, width - 1):
+            break
+        kept += char
+        used += size
+    return kept + "…"
 
 
 # 榜单列表可能藏在这些键里（不同中转站接口命名习惯不同）
@@ -837,19 +870,27 @@ class SpendingRankPlugin(Star):
             except Exception as exc:
                 raise RenderError(f"渲染结果下载失败：{exc}") from exc
 
+    def _render_mode(self) -> str:
+        """出图通道：auto / local / remote / text（text = 永不出图，只发文字）。"""
+        mode = str(self._cfg("render_mode") or DEFAULT_CONFIG["render_mode"]).strip().lower()
+        if mode not in ("auto", "local", "remote", "text"):
+            logger.warning(f"[SpendingRank] render_mode 取值不合法（{mode!r}），已按 auto 处理")
+            return "auto"
+        return mode
+
     async def _render_image(self, panels: list[dict], meta: dict) -> bytes:
         """渲染成图片字节流，通道顺序由 render_mode 决定。
 
         auto   ：本地优先，本地挂了再走远端
         local  ：只用本地
         remote ：只用远端
+        text   ：不出图（调用方应改走纯文字）
 
         本地这条通道不碰网络，所以「远端 t2i 429/503」不会再让插件出不了图。
         """
-        mode = str(self._cfg("render_mode") or DEFAULT_CONFIG["render_mode"]).strip().lower()
-        if mode not in ("auto", "local", "remote"):
-            logger.warning(f"[SpendingRank] render_mode 取值不合法（{mode!r}），已按 auto 处理")
-            mode = "auto"
+        mode = self._render_mode()
+        if mode == "text":
+            raise RenderError("render_mode = text，当前只输出纯文字")
 
         errors: list[str] = []
 
@@ -871,37 +912,89 @@ class SpendingRankPlugin(Star):
         raise RenderError("；".join(errors) or "渲染失败")
 
     @staticmethod
-    def _plain_leaderboard(panels: list[dict], meta: dict, brand: str, show_cost: bool) -> str:
-        """出图全线失败时的兜底：纯文字榜单，双榜就上下分段。"""
-        lines = [f"🏆 {brand} 今日榜单 · {meta.get('date', '')}"]
-        multi = len(panels) > 1
+    def _plain_leaderboard(
+        panels: list[dict], meta: dict, brand: str, show_cost: bool, limit: int = 0
+    ) -> str:
+        """纯文字榜单：出图失败时的兜底，也是 render_mode = text 时的唯一输出。
 
+        limit > 0 时每榜只列前 limit 名（与图片口径一致）；0 表示列表里有多少画多少。
+        """
+        date = str(meta.get("date") or "").strip()
+        lines = [f"🏆 {brand} 今日榜单" + (f"  {date}" if date else ""), ""]
+
+        multi = len(panels) > 1
+        total_lines = 0
+        # 名字列宽按所有榜里最长的名字统一算，两个榜上下对齐才好看
+        name_width = min(
+            18,
+            max(
+                (
+                    _disp_width(str(row.get("name") or "匿名用户"))
+                    for panel in panels
+                    for row in (panel.get("rows") or [])
+                ),
+                default=8,
+            ),
+        )
         for panel in panels:
             rows = panel.get("rows") or []
+            if limit > 0:
+                rows = rows[:limit]
+            total_lines += len(rows)
+
             if multi:
-                lines.extend(["", f"【{panel.get('title') or '榜单'}】"])
+                lines.append(f"【{panel.get('title') or '榜单'}】")
             if not rows:
                 lines.append("  今天还没有人上榜")
+                lines.append("")
                 continue
+
             for index, row in enumerate(rows, start=1):
                 rank = row.get("rank") or index
+                name = _pad_text(
+                    _clip_text(str(row.get("name") or "匿名用户"), name_width), name_width
+                )
                 parts = [
-                    f"{rank}. {row.get('name') or '匿名用户'}",
-                    f"{row.get('tokens_display') or '0'} tokens",
-                    f"{row.get('requests_display') or '0'} 次",
+                    f"{str(row.get('tokens_display') or '0'):>8} tokens",
+                    f"{str(row.get('requests_display') or '0'):>4} 次",
                 ]
                 if show_cost:
                     parts.append("$" + str(row.get("cost_display") or "0"))
-                lines.append("  ·  ".join(parts))
+                lines.append(f"{str(rank):>2}. {name}  " + " · ".join(parts))
+            lines.append("")
+
+        if not total_lines and not panels:
+            # 面板本身就是空列表时才需要兜一句；有面板的情况上面已经说过了
+            lines.append("今天还没有人上榜")
+            lines.append("")
 
         tail = (
             f"共 {meta.get('total_users', 0)} 人上榜"
-            f" · 合计 Token {meta.get('total_tokens_display', '0')}"
+            f" · 合计 {meta.get('total_tokens_display', '0')} tokens"
         )
         if show_cost:
-            tail += " · 合计 $" + str(meta.get("total_cost_display", "0"))
-        lines.extend(["", tail, f"数据更新于 {meta.get('updated_at', '')}"])
-        return "\n".join(lines)
+            tail += " · $" + str(meta.get("total_cost_display", "0"))
+        lines.append(tail)
+        if meta.get("updated_at"):
+            lines.append(f"更新于 {meta['updated_at']}")
+        return "\n".join(lines).rstrip()
+
+    def _plain_text(self, panels: list[dict], meta: dict) -> str:
+        """按当前配置拼一条纯文字榜单。"""
+        return self._plain_leaderboard(
+            panels,
+            meta,
+            str(self._cfg("brand") or DEFAULT_CONFIG["brand"]),
+            self._cfg_bool("show_cost", True),
+        )
+
+    @staticmethod
+    def _wants_text(message: str) -> bool:
+        """消息里是否有「我要文字版」的意图（/排行榜 文字、/看榜 纯文本、txt …）。"""
+        text = str(message or "").lower()
+        if not text:
+            return False
+        return any(key in text for key in ("文字", "文本", "txt", "text"))
 
     # ------------------------------------------------------------------
     # 消息发送
@@ -947,26 +1040,24 @@ class SpendingRankPlugin(Star):
             return
 
         chain: Any
-        try:
-            png = await self._render_image(panels, meta)
-            b64 = base64.b64encode(png).decode("ascii")
-            chain = MessageChain([Image.fromBase64(b64)])
-        except Exception as exc:
-            logger.error(f"[SpendingRank] 定时播报渲染失败，降级为纯文字：{exc}")
+        if self._render_mode() == "text":
+            # 纯文本模式：不碰渲染器，直接把榜单当文字发出去
+            chain = MessageChain([Plain(self._plain_text(panels, meta))])
+        else:
             try:
-                chain = MessageChain([
-                    Plain(
-                        self._plain_leaderboard(
-                            panels,
-                            meta,
-                            str(self._cfg("brand") or DEFAULT_CONFIG["brand"]),
-                            self._cfg_bool("show_cost", True),
-                        )
-                    )
-                ])
-            except Exception as exc2:
-                logger.error(f"[SpendingRank] 构造文字消息链失败：{exc2}")
-                return
+                png = await self._render_image(panels, meta)
+                b64 = base64.b64encode(png).decode("ascii")
+                chain = MessageChain([Image.fromBase64(b64)])
+            except Exception as exc:
+                if not self._cfg_bool("plain_fallback", True):
+                    logger.error(f"[SpendingRank] 定时播报渲染失败，且已关闭文字兜底：{exc}")
+                    return
+                logger.error(f"[SpendingRank] 定时播报渲染失败，降级为纯文字：{exc}")
+                try:
+                    chain = MessageChain([Plain(self._plain_text(panels, meta))])
+                except Exception as exc2:
+                    logger.error(f"[SpendingRank] 构造文字消息链失败：{exc2}")
+                    return
 
         try:
             ok = await self.context.send_message(umo, chain)
@@ -988,7 +1079,7 @@ class SpendingRankPlugin(Star):
         alias={"消费榜", "消费排行榜", "消费排行", "看榜", "看看榜"},
     )
     async def cmd_spending_rank(self, event: AstrMessageEvent):
-        """查看当日全站消费排行榜"""
+        """查看当日全站消费排行榜（加「文字」两个字则只发纯文本，不出图）"""
         try:
             panels, meta, error = await self._fetch_leaderboard()
             if error:
@@ -998,19 +1089,21 @@ class SpendingRankPlugin(Star):
                 yield event.plain_result("📭 今日暂无消费记录，榜单还是空的哦～")
                 return
 
+            # 纯文本的两种来路：配置里把 render_mode 设成 text，或本次指令带了「文字」
+            if self._render_mode() == "text" or self._wants_text(event.message_str):
+                yield event.plain_result(self._plain_text(panels, meta))
+                return
+
             try:
                 png = await self._render_image(panels, meta)
-            except RenderError as exc:
-                # 三条渲染通道全挂也不让群友白等：降级成纯文字榜单
+            except Exception as exc:
+                # 渲染通道全挂也不让群友白等：降级成纯文字榜单
+                if not self._cfg_bool("plain_fallback", True):
+                    logger.error(f"[SpendingRank] 渲染失败，且已关闭文字兜底：{exc}")
+                    yield event.plain_result(f"❌ 榜单图片渲染失败：{exc}")
+                    return
                 logger.error(f"[SpendingRank] 渲染失败，降级为纯文字：{exc}")
-                yield event.plain_result(
-                    self._plain_leaderboard(
-                        panels,
-                        meta,
-                        str(self._cfg("brand") or DEFAULT_CONFIG["brand"]),
-                        self._cfg_bool("show_cost", True),
-                    )
-                )
+                yield event.plain_result(self._plain_text(panels, meta))
                 return
 
             yield self._image_result(event, png)
@@ -1060,14 +1153,18 @@ class SpendingRankPlugin(Star):
             yield "今日暂无消费记录，榜单还是空的。"
             return
 
-        send_image = self._cfg_bool("llm_tool_send_image", True) and bool(with_image)
+        send_image = (
+            self._cfg_bool("llm_tool_send_image", True)
+            and bool(with_image)
+            and self._render_mode() != "text"
+        )
         if send_image:
             try:
                 # 图里画的是 top_n 完整名单，文字摘要再按 top 参数裁剪
                 png = await self._render_image(panels, meta)
                 yield self._image_result(event, png)
             except Exception as exc:
-                logger.warning(f"[SpendingRank] LLM 工具出图失败，只返回文字：{exc}")
+                logger.warning(f"[SpendingRank] LLM 工具出图失败，改为纯文字作答：{exc}")
                 send_image = False
 
         limit = max(1, min(_to_int(top, 5), 10))
@@ -1127,7 +1224,8 @@ class SpendingRankPlugin(Star):
         lines.append(
             "榜单图片已发到当前会话，回复时用一两句话点出重点即可，不要把整张榜逐条复述。"
             if image_sent
-            else "榜单图片未发送，可以直接引用上面的排名数据回答。"
+            else "这次没有发图（渲染不可用或已按要求只给文字），请直接按上面的排名数据用纯文字作答，"
+            "不要提「图片渲染失败」之类的话。"
         )
         return "\n".join(lines)
 
