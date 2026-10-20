@@ -106,5 +106,17 @@
     "type": "int",
     "hint": "默认 60 秒。渲染服务排队较慢时可调大。",
     "default": 60
+  },
+  "llm_tool_enabled": {
+    "description": "允许 LLM 自动看榜",
+    "type": "bool",
+    "hint": "开启后会把「看榜」注册成 LLM 工具，群友说「看看榜」「今天谁用得最多」时模型会自动调用并发图，不需要打指令（要求所用模型支持函数调用）。关闭后工具从全局工具表移除，只能用 /排行榜 指令。",
+    "default": true
+  },
+  "llm_tool_send_image": {
+    "description": "LLM 看榜时直接发图",
+    "type": "bool",
+    "hint": "关闭后 LLM 调工具只拿文字数据、不往群里发图，避免模型每次调用都刷一张榜。",
+    "default": true
   }
 }

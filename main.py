@@ -3,15 +3,18 @@
 
 功能概览
 --------
-1. 被动触发：群内发送 /排行榜（别名：消费榜 / 消费排行榜 / 消费排行），
+1. 被动触发：群内发送 /排行榜（别名：消费榜 / 消费排行榜 / 消费排行 / 看榜 / 看看榜），
    立即拉取接口数据、渲染当日榜单图并发送到当前会话。
 2. 主动定时：每天 cron_time（默认 23:00）自动把当天榜单图推送到 target_group。
-3. 榜单口径：接口同时给出 data.ranking（Token 用量榜）与 data.spending_ranking
+3. LLM 工具：把「看榜」注册成函数调用工具 get_daily_leaderboard，群友说「看看榜」
+   「今天谁用得最多」时模型自己调用：先按 top_n 出图直接发到会话，再把前 N 名与
+   全站合计的文字摘要回给模型点评。由 llm_tool_enabled 开关控制。
+4. 榜单口径：接口同时给出 data.ranking（Token 用量榜）与 data.spending_ranking
    （消耗额度榜）时，两个榜并排画进同一张图；只有一套时退化为单榜。
    排名一律按指标自己重排（接口自带的 rank 与该榜的排序字段并不一致，插件不信它）。
-4. 数据缓存：cache_ttl 秒内复用同一份数据，既防群友狂点，也避免定时任务与
+5. 数据缓存：cache_ttl 秒内复用同一份数据，既防群友狂点，也避免定时任务与
    手动指令并发把接口刷爆。
-5. 图片渲染：默认用内置的本地渲染器直接画图（纯 Pillow，不联网、不依赖
+6. 图片渲染：默认用内置的本地渲染器直接画图（纯 Pillow，不联网、不依赖
    浏览器）；远端 t2i 服务只作为可选通道，详见下方「渲染说明」。
 
 依赖安装
@@ -36,7 +39,7 @@
 三条通道全挂时，插件不再只回一句报错，而是把榜单降级成纯文字发出去，
 保证群里至少能看到数据。
 
-作者：zjh19    版本：v1.1.0
+作者：zjh19    版本：v1.4.0
 """
 
 from __future__ import annotations
@@ -61,6 +64,10 @@ TEMPLATE_FILE = PLUGIN_DIR / "template.html"
 
 # t2i 渲染服务要求的 User-Agent，UA 不对会直接被 403 挡掉
 T2I_USER_AGENT = "AstrBot/t2i"
+
+# 注册给 LLM 的函数调用工具名。改名时要同步 metadata.yaml / README 的说明，
+# 并注意 __init__ 里按配置停用时用的是同一个常量。
+LLM_TOOL_NAME = "get_daily_leaderboard"
 
 RENDER_HINT = (
     "榜单图片渲染失败。本插件不依赖本机 Chromium，而是调用 t2i 渲染服务出图：\n"
@@ -90,6 +97,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "render_mode": "auto",
     "t2i_endpoint": "https://t2i.soulter.top/text2img",
     "render_timeout": 60,
+    "llm_tool_enabled": True,
+    "llm_tool_send_image": True,
 }
 
 
@@ -248,6 +257,17 @@ class SpendingRankPlugin(Star):
         )
         self._template: Any = None
         self._load_template()
+
+        # LLM 工具是全局注册的，配置里关掉之后要主动从工具表摘掉，
+        # 否则模型会一直看到这个工具、每次都白调用一次再被拒。
+        if not self._cfg_bool("llm_tool_enabled", True):
+            try:
+                self.context.deactivate_llm_tool(LLM_TOOL_NAME)
+                logger.info(
+                    f"[SpendingRank] llm_tool_enabled=false，已停用 LLM 工具 {LLM_TOOL_NAME}"
+                )
+            except Exception as exc:  # pragma: no cover - 依赖 AstrBot 版本
+                logger.warning(f"[SpendingRank] 停用 LLM 工具失败（不影响指令）：{exc}")
 
         self._start_scheduler()
 
@@ -963,7 +983,10 @@ class SpendingRankPlugin(Star):
     # ------------------------------------------------------------------
     # 指令：/排行榜
     # ------------------------------------------------------------------
-    @filter.command("排行榜", alias={"消费榜", "消费排行榜", "消费排行"})
+    @filter.command(
+        "排行榜",
+        alias={"消费榜", "消费排行榜", "消费排行", "看榜", "看看榜"},
+    )
     async def cmd_spending_rank(self, event: AstrMessageEvent):
         """查看当日全站消费排行榜"""
         try:
@@ -994,6 +1017,119 @@ class SpendingRankPlugin(Star):
         except Exception as exc:
             logger.error(f"[SpendingRank] /排行榜 执行异常：{exc}", exc_info=True)
             yield event.plain_result(f"❌ 排行榜指令执行异常：{exc}")
+
+    # ------------------------------------------------------------------
+    # LLM 工具：让模型自己决定「看看榜」
+    # ------------------------------------------------------------------
+    @filter.llm_tool(name=LLM_TOOL_NAME)
+    async def llm_tool_leaderboard(
+        self,
+        event: AstrMessageEvent,
+        panel: str = "all",
+        top: int = 5,
+        with_image: bool = True,
+    ):
+        """查看 WorldCodes 全站「今日消费排行榜」（Token 用量榜 + 消耗额度榜）。
+
+        群友说「看看榜」「看下排行榜」「今天谁用得最多」「谁花的钱最多」「现在第一名是谁」
+        这类话时调用；和榜单无关的闲聊不要调用。会返回榜单文字摘要，并可把榜单图片
+        直接发到当前会话。
+
+        Args:
+            panel(string): 看哪个榜：all=两个榜都看（默认）、token=只看 Token 用量榜、cost=只看消耗额度榜
+            top(number): 文字摘要里每个榜列出前几名，取 1-10，默认 5
+            with_image(boolean): 是否把榜单图片一并发到当前会话，默认 true；只要文字数据时填 false
+        """
+        if not self._cfg_bool("llm_tool_enabled", True):
+            # 正常情况 __init__ 已经把工具停用了，这里兜住「停用失败 / 热改配置」
+            yield "排行榜的 LLM 工具已被管理员关闭，可以直接用 /排行榜 指令出图。"
+            return
+
+        try:
+            panels, meta, error = await self._fetch_leaderboard()
+        except Exception as exc:
+            logger.error(f"[SpendingRank] LLM 工具查询异常：{exc}", exc_info=True)
+            yield f"排行榜查询失败：{exc}"
+            return
+
+        if error:
+            yield f"排行榜数据获取失败：{error}"
+            return
+
+        if not any(item.get("rows") for item in panels):
+            yield "今日暂无消费记录，榜单还是空的。"
+            return
+
+        send_image = self._cfg_bool("llm_tool_send_image", True) and bool(with_image)
+        if send_image:
+            try:
+                # 图里画的是 top_n 完整名单，文字摘要再按 top 参数裁剪
+                png = await self._render_image(panels, meta)
+                yield self._image_result(event, png)
+            except Exception as exc:
+                logger.warning(f"[SpendingRank] LLM 工具出图失败，只返回文字：{exc}")
+                send_image = False
+
+        limit = max(1, min(_to_int(top, 5), 10))
+        yield self._llm_digest(self._pick_panels(panels, panel), meta, limit, send_image)
+
+    @staticmethod
+    def _pick_panels(panels: list[dict], mode: Any) -> list[dict]:
+        """按模型传进来的 panel 参数挑榜；认不出来就两个榜都给。"""
+        key = str(mode or "all").strip().lower()
+        if key in ("token", "tokens", "usage", "token_usage"):
+            wanted = "tokens"
+        elif key in ("cost", "spending", "spend", "money"):
+            wanted = "cost"
+        else:
+            return panels
+        return [item for item in panels if item.get("metric") == wanted] or panels
+
+    @staticmethod
+    def _llm_digest(
+        panels: list[dict], meta: dict, limit: int, image_sent: bool
+    ) -> str:
+        """给模型看的榜单摘要：只列前 limit 名，避免让它把整张表再复述一遍。"""
+        lines = [
+            "WorldCodes 今日榜单 · {}".format(
+                meta.get("date") or datetime.now().strftime("%Y-%m-%d")
+            )
+        ]
+        for item in panels:
+            rows = item.get("rows") or []
+            total = item.get("total_rows") or len(rows)
+            lines.append("")
+            lines.append(f"【{item.get('title') or '榜单'}】共 {total} 人上榜")
+            if not rows:
+                lines.append("  今天还没有人上榜")
+                continue
+            for index, row in enumerate(rows[:limit], start=1):
+                lines.append(
+                    "  {}. {}：{} tokens / {} 次请求 / ${}".format(
+                        index,
+                        row.get("name") or "匿名用户",
+                        row.get("tokens_display") or "0",
+                        row.get("requests_display") or "0",
+                        row.get("cost_display") or "0",
+                    )
+                )
+            if len(rows) > limit:
+                lines.append(f"  （仅列前 {limit} 名，完整名单在图片里）")
+
+        lines.append("")
+        lines.append(
+            "全站合计：{} 人上榜、{} tokens、${}".format(
+                meta.get("total_users", 0),
+                meta.get("total_tokens_display", "0"),
+                meta.get("total_cost_display", "0"),
+            )
+        )
+        lines.append(
+            "榜单图片已发到当前会话，回复时用一两句话点出重点即可，不要把整张榜逐条复述。"
+            if image_sent
+            else "榜单图片未发送，可以直接引用上面的排名数据回答。"
+        )
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # 定时任务
